@@ -105,13 +105,31 @@ await scenario("fair queue: a failing library backs off and does not starve a ne
 });
 
 await scenario("403 block: stop quickly, keep progress, exit 5", { libs: { m6: { BLURAY: 40, DVD: 40 } }, blockAfter: 14 }, async c => {
-  const r = c.run(["--only", "m6"]);
+  const r = c.run(["--only", "m6", "--budget-min", "0.05"], { COOL_PROBE_MS: "300" });
   ok(r.code === 5, `exit 5 = blocked (got ${r.code})`);
   ok(/BLOCKED/.test(r.log), "log says BLOCKED");
   const h = await c.hits();
   ok(h.blocked <= 12, `did not keep hammering after the block (${h.blocked} blocked requests)`);
   ok(c.has(path.join(c.state, "m6.json")) && !c.has(path.join(c.out, "snap/m6.json.gz")), "progress saved, nothing published");
   ok(/blocked/.test(c.status().libraries.m6.state), "status says blocked");
+});
+
+await scenario("a temporary block: wait with probes, then finish the same copy", { libs: { m7: { BLURAY: 20, DVD: 20 } }, blockEvery: { after: 25, forMs: 1500 } }, async c => {
+  const r = c.run(["--only", "m7"], { PARALLEL: "2", COOL_PROBE_MS: "200" });
+  ok(r.code === 0, `finished after the block lifted (exit ${r.code})`);
+  ok(/let us back in/.test(r.log), "logged that the gateway let us back in");
+  const s = c.status();
+  ok(s.gateway.blocks.length >= 1 && s.gateway.blocks[0].recovered && s.gateway.blocks[0].requestsBefore > 0, `block recorded with its length (${JSON.stringify(s.gateway.blocks[0])})`);
+  ok(c.snap("m7").rows.length === 1000, "complete copy of 1000 titles published");
+  const h = await c.hits();
+  ok(h.blocked < 60, `did not hammer while blocked (${h.blocked} blocked requests, ${h.blocks} blocks)`);
+});
+
+await scenario("a block that never lifts: gives up inside the budget, keeps progress, exit 5", { libs: { m8: { BLURAY: 40, DVD: 40 } }, blockAfter: 14 }, async c => {
+  const r = c.run(["--only", "m8", "--budget-min", "0.05"], { COOL_PROBE_MS: "300" });
+  ok(r.code === 5, `exit 5 (got ${r.code})`);
+  ok(c.has(path.join(c.state, "m8.json")) && !c.has(path.join(c.out, "snap/m8.json.gz")), "progress kept, nothing published");
+  ok(c.status().gateway.blocks.some(b => !b.recovered), "status records the block that did not lift");
 });
 
 await scenario("thin catalog fails validation instead of publishing", { libs: { m9: { BLURAY: 6, DVD: 6, thin: true } } }, async c => {

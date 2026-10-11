@@ -5,7 +5,7 @@
 import http from "node:http";
 import fs from "node:fs";
 const [port, cfgPath] = [process.argv[2], process.argv[3]];
-const hits = { pages: 0, byKey: {}, shard: 0, want: 0 }, seen429 = new Set();
+const hits = { pages: 0, byKey: {}, shard: 0, want: 0, run: 0, until: 0 }, seen429 = new Set();
 const TITLES = ["Alien", "Jaws", "Heat", "Casablanca", "Vertigo", "Psycho", "Rocky", "Fargo", "Se7en", "Taxi Driver", "Gladiator", "Titanic", "Up", "Cars", "Coco", "Brave", "Her", "Drive", "Heat", "Ran"];
 http.createServer((req, res) => {
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
@@ -16,6 +16,12 @@ http.createServer((req, res) => {
     const lib = cfg.libs[slug]; if (!lib) { res.writeHead(404); return res.end("{}"); }
     const key = `${slug}:${fmt}:${page}`;
     hits.pages++;
+    if (cfg.blockEvery) {            // blocks after N requests, lets us back in forMs later (probes while blocked do not extend it)
+      const now = Date.now();
+      if (hits.until && now < hits.until) { hits.blocked = (hits.blocked || 0) + 1; res.writeHead(403); return res.end("{}"); }
+      if (hits.until && now >= hits.until) { hits.until = 0; hits.run = 0; }
+      if (++hits.run > cfg.blockEvery.after) { hits.until = now + cfg.blockEvery.forMs; hits.run = 0; hits.blocks = (hits.blocks || 0) + 1; hits.blocked = (hits.blocked || 0) + 1; res.writeHead(403); return res.end("{}"); }
+    }
     if (cfg.blockAfter && hits.pages > cfg.blockAfter) { hits.blocked = (hits.blocked || 0) + 1; res.writeHead(403); return res.end("{}"); } hits.byKey[key] = (hits.byKey[key] || 0) + 1;
     const send = () => {
       const f = cfg.fail?.[key];

@@ -26,6 +26,7 @@ const arg = (n, d) => { const i = process.argv.indexOf("--" + n); return i > 0 ?
 const OUT = arg("out", "out"), STATE = arg("state", "state"), ONLY = arg("only", ""), DRY = process.argv.includes("--dry");
 const BUDGET_MS = +arg("budget-min", 15) * 60e3, T0 = Date.now(), DEADLINE = T0 + BUDGET_MS;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const COOL_PROBE_MS = +(process.env.COOL_PROBE_MS || 60000);   // while blocked, one cheap probe per minute
 const RETRY_BASE = +(process.env.RETRY_BASE_MS || 1000), PASS_WAIT = +(process.env.PASS_WAIT_MS || 20000);
 const log = (...a) => console.log(...a);
 
@@ -176,6 +177,26 @@ function saveState(st) {
   writeAtomic(path.join(STATE, st.slug + ".json"), JSON.stringify({ ...rest, fmts }));
 }
 
+// Wait out a block. Returns seconds waited, or null if the run's time budget ran out first.
+async function coolDown(slug) {
+  const t0 = Date.now(), asked = stats.requests - reqsAtRecovery;
+  log(`  gateway blocked us after ${asked} requests since the last block; probing once a minute`);
+  while (Date.now() + COOL_PROBE_MS < DEADLINE) {
+    await sleep(COOL_PROBE_MS);
+    try { await getJson(pageUrl(slug, "DVD", 1), { tries: 1, limit: true }); }
+    catch (e) { if (e.blocked) continue; else continue; }
+    const secs = Math.round((Date.now() - t0) / 1e3);
+    status.gateway.blocks.push({ at: new Date(t0).toISOString(), requestsBefore: asked, blockedSeconds: secs, recovered: true });
+    status.gateway.blocks = status.gateway.blocks.slice(-40);
+    reqsAtRecovery = stats.requests;
+    log(`  gateway let us back in after ${secs} s (it had allowed ${asked} requests)`);
+    return secs;
+  }
+  status.gateway.blocks.push({ at: new Date(t0).toISOString(), requestsBefore: asked, blockedSeconds: Math.round((Date.now() - t0) / 1e3), recovered: false });
+  status.gateway.blocks = status.gateway.blocks.slice(-40);
+  return null;
+}
+
 // ---- one library ------------------------------------------------------------------------------
 // returns { result: "done" | "paused" | "failed", ... }
 async function crawlLibrary(slug, st) {
@@ -207,9 +228,17 @@ async function crawlLibrary(slug, st) {
         const got = await Promise.allSettled(batch.map(n => getJson(pageUrl(slug, fmt, n), { tries: 4, limit: true })));
         got.forEach((g, k) => { if (g.status === "fulfilled") { take(g.value, f); done.add(batch[k]); stats.pages++; } });
         stats.busyMs += Date.now() - tb;
-        // the gateway answering 403 to a whole batch (twice running) means this address is blocked: stop, keep the work, say so
-        if (got.every(g => g.status === "rejected" && g.reason?.blocked)) { if (++blockedBatches >= 2) { saveState(st); return { result: "blocked", error: `the library gateway answered 403 (blocked) after ${stats.requests} requests this run` }; } }
-        else blockedBatches = 0;
+        // The gateway answering 403 to a whole batch (twice running) means this address is blocked. Stop asking,
+        // wait with one cheap probe a minute until it lets us back in, then carry on. The pages that failed are
+        // retried in the second pass. Records every block so the real sustainable rate is known, not guessed.
+        if (got.every(g => g.status === "rejected" && g.reason?.blocked)) {
+          if (++blockedBatches >= 2) {
+            saveState(st);
+            const cool = await coolDown(slug);
+            if (cool === null) return { result: "blocked", error: `the library gateway kept answering 403 (blocked); gave up waiting after ${stats.requests} requests this run` };
+            blockedBatches = 0;
+          }
+        } else blockedBatches = 0;
         if (Date.now() - lastSave > 60e3) { saveState(st); lastSave = Date.now(); }
       }
     }
@@ -266,6 +295,8 @@ fs.mkdirSync(path.join(OUT, "snap"), { recursive: true }); fs.mkdirSync(STATE, {
 const idxPath = path.join(OUT, "snap", "index.json"), statusPath = path.join(OUT, "snap", "status.json");
 const index = readJson(idxPath, {});
 const status = readJson(statusPath, { libraries: {} });
+status.gateway = status.gateway || { blocks: [] };
+let reqsAtRecovery = 0;
 const now = Date.now();
 
 const wanted = await wantedList();

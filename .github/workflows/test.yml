@@ -2,14 +2,10 @@ name: Quick test
 on: workflow_dispatch
 jobs:
   t:
-    strategy: { fail-fast: false, matrix: { cfg: ["2:0", "4:0", "8:0", "2:1000"] } }
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: |
-          export PARALLEL=${{ matrix.cfg }}; export GAP_MS=${PARALLEL#*:}; export PARALLEL=${PARALLEL%%:*}
-          echo "parallel=$PARALLEL gap=$GAP_MS"
-          time node crawl.mjs --out /tmp/o --only aclibrary --max-pages 150 --budget-min 8
+      - run: time node crawl.mjs --out /tmp/o --only aclibrary --budget-min 25

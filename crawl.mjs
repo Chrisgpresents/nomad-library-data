@@ -84,7 +84,7 @@ const shards = new Map();
 const shardKey = k => (k + "_").slice(0, 2).replace(/ /g, "_");
 async function shard(k) {
   const s = shardKey(k);
-  if (!shards.has(s)) shards.set(s, getJson(`${SITE}/ix/${s}.json`, 4).catch(() => ({})));
+  if (!shards.has(s)) shards.set(s, getJson(`${SITE}/ix/${s}.json`, 1).catch(() => ({})));
   return shards.get(s);
 }
 async function attachRatings(rows) {
@@ -140,7 +140,7 @@ async function crawlLibrary(slug) {
       const tb = Date.now();
       const got = await Promise.allSettled(batch.map(p => getJson(pageUrl(slug, fmt, p), 3)));
       if (GAP) await sleep(GAP);
-      if (((n - 2) / PARALLEL) % 20 === 0) console.log(`  ${slug} ${fmt} page ${n}/${pages} batch ${Date.now() - tb}ms, ${((Date.now() - T0) / 1e3).toFixed(0)}s in`);
+      if (((n - 2) / PARALLEL) % 10 === 0 || Date.now() - tb > 4000) console.log(`  ${slug} ${fmt} page ${n}/${pages} batch ${Date.now() - tb}ms, ${((Date.now() - T0) / 1e3).toFixed(0)}s in`);
       for (const g of got) { if (g.status === "fulfilled") take(g.value, f, rows, seen, ids); else bad++; }
     }
   }

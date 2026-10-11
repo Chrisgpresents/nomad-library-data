@@ -303,6 +303,8 @@ const wanted = await wantedList();
 if (wanted === null && !ONLY) process.exit(4);
 const names = new Map(), asked = new Map();
 for (const [slug, name, at] of wanted || []) { names.set(slug, name || slug); asked.set(slug, at || 1); }
+// libraries already copied stay fresh even if nobody has "requested" them lately (they were requested once)
+for (const [slug, e] of Object.entries(index)) if (!names.has(slug)) { names.set(slug, e.name || slug); asked.set(slug, 0); }
 let candidates = ONLY ? ONLY.split(",") : [...names.keys()];
 const queue = [], waiting = [];
 for (const slug of candidates) {

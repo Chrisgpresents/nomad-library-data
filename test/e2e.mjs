@@ -142,8 +142,23 @@ await scenario("old unfiltered list format is refused, not read as 'copy everyth
   const r = c.run();
   ok(/wanted list unavailable/.test(r.log), "warns that the wanted list is unusable");
   const h = await c.hits();
-  ok(!h.byKey["a:BLURAY:1"] && Object.keys(h.byKey).every(k => ["bclsnj", "chipublib", "seattle", "nypl"].includes(k.split(":")[0])), "only the four quick picks were touched");
+  ok(r.code === 4, "unavailable wanted list fails visibly");
+  ok(Object.keys(h.byKey).length === 0, "no catalog is touched without a valid request list");
 });
+
+await scenario("no visitor requests means no copying", { libs: quick, wanted: [] }, async c => {
+  const r = c.run();
+  ok(r.code === 3, "empty queue exits with nothing to do");
+  ok(Object.keys((await c.hits()).byKey).length === 0, "no seeded library is fetched");
+});
+await scenario("only the requested library is copied", { libs: { ...quick, visitorlib: small }, wanted: [["visitorlib", "Requested library", 1]] }, async c => {
+  const r = c.run();
+  ok(r.code === 0, "visitor request completes");
+  ok(Object.keys(c.index()).join() === "visitorlib", "only the requested catalog is published");
+  ok(Object.keys((await c.hits()).byKey).every(k => k.startsWith("visitorlib:")), "unrequested libraries are never fetched");
+});
+if (fail) process.exitCode = 1;
+
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -17,15 +17,17 @@ jobs:
         run: |
           REPO="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
           git clone --depth 1 --branch gh-pages "$REPO" out || { mkdir out && git -C out init -q && git -C out remote add origin "$REPO"; }
-      - name: Copy catalogs
-        run: node crawl.mjs --out out --budget-min 300
-      - name: Publish
-        if: always()
+      - name: Copy catalogs, publishing every ~20 minutes
         run: |
-          cd out
-          touch .nojekyll
-          git config user.name "library-copier"; git config user.email "noreply@users.noreply.github.com"
-          git checkout --orphan publish
-          git add -A
-          git commit -q -m "Catalog copies $(date -u +%F)" || exit 0
-          git push -f origin publish:gh-pages
+          publish() {
+            ( cd out && touch .nojekyll \
+              && git config user.name "library-copier" && git config user.email "noreply@users.noreply.github.com" \
+              && git checkout -q --orphan "p$RANDOM" && git add -A \
+              && git commit -q -m "Catalog copies $(date -u +%F)" \
+              && git push -q -f origin HEAD:gh-pages ) || true
+          }
+          for i in $(seq 1 13); do
+            rc=0; node crawl.mjs --out out --budget-min 20 || rc=$?
+            publish
+            [ "$rc" = 3 ] && break
+          done

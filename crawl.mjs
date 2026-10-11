@@ -9,7 +9,7 @@ const SITE = "https://library.nomadovernormal.com";
 const GW = "https://gateway.bibliocommons.com/v2/libraries";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 const FMTS = [["BLURAY", "b"], ["DVD", "d"], ["VIDEO_GAME", "g"]];
-const PARALLEL = 8, STALE_DAYS = 6;
+const PARALLEL = +(process.env.PARALLEL || 8), GAP = +(process.env.GAP_MS || 0), STALE_DAYS = 6;
 
 const arg = (n, d) => { const i = process.argv.indexOf("--" + n); return i > 0 ? process.argv[i + 1] : d; };
 const OUT = arg("out", "out"), ONLY = arg("only", ""), BUDGET = +arg("budget-min", 300) * 60e3, MAXP = +arg("max-pages", 1e9);
@@ -137,7 +137,10 @@ async function crawlLibrary(slug) {
     for (let n = 2; n <= pages; n += PARALLEL) {
       if (Date.now() - T0 > BUDGET + 15 * 60e3) throw new Error("out of time");
       const batch = Array.from({ length: Math.min(PARALLEL, pages - n + 1) }, (_, i) => n + i);
+      const tb = Date.now();
       const got = await Promise.allSettled(batch.map(p => getJson(pageUrl(slug, fmt, p), 3)));
+      if (GAP) await sleep(GAP);
+      if (((n - 2) / PARALLEL) % 20 === 0) console.log(`  ${slug} ${fmt} page ${n}/${pages} batch ${Date.now() - tb}ms, ${((Date.now() - T0) / 1e3).toFixed(0)}s in`);
       for (const g of got) { if (g.status === "fulfilled") take(g.value, f, rows, seen, ids); else bad++; }
     }
   }

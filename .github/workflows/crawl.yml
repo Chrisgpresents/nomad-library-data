@@ -1,0 +1,31 @@
+name: Copy library catalogs
+on:
+  schedule:
+    - cron: "23 7 * * *"   # daily: adds newly requested libraries first, refreshes any copy older than 6 days
+  workflow_dispatch:
+concurrency: { group: crawl, cancel-in-progress: false }
+permissions: { contents: write }
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Load the copies made so far
+        run: |
+          REPO="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git clone --depth 1 --branch gh-pages "$REPO" out || { mkdir out && git -C out init -q && git -C out remote add origin "$REPO"; }
+      - name: Copy catalogs
+        run: node crawl.mjs --out out --budget-min 300
+      - name: Publish
+        if: always()
+        run: |
+          cd out
+          touch .nojekyll
+          git config user.name "library-copier"; git config user.email "noreply@users.noreply.github.com"
+          git checkout --orphan publish
+          git add -A
+          git commit -q -m "Catalog copies $(date -u +%F)" || exit 0
+          git push -f origin publish:gh-pages

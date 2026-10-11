@@ -157,6 +157,12 @@ await scenario("only the requested library is copied", { libs: { ...quick, visit
   ok(Object.keys(c.index()).join() === "visitorlib", "only the requested catalog is published");
   ok(Object.keys((await c.hits()).byKey).every(k => k.startsWith("visitorlib:")), "unrequested libraries are never fetched");
 });
+await scenario("a copied library stays fresh even when it is not on the wanted list", { libs: { oldlib: small }, wanted: [] }, async c => {
+  ok(c.run(["--only", "oldlib"]).code === 0, "copied once");
+  const idx = c.index(); idx.oldlib.finished -= 30 * 864e5; fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
+  const r = c.run();
+  ok(r.code === 0 && c.index().oldlib.finished > idx.oldlib.finished + 20 * 864e5, `refreshed without being requested again (exit ${r.code})`);
+});
 if (fail) process.exitCode = 1;
 
 

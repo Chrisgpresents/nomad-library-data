@@ -78,7 +78,7 @@ await scenario("budget runs out mid-library, then resumes without refetching", {
 
 await scenario("a failing page: no publish, old copy kept, only that page retried later", { libs: { m4: { BLURAY: 5, DVD: 5 } } }, async c => {
   ok(c.run(["--only", "m4"]).code === 0, "first copy published");
-  const idx = c.index(); idx.m4.finished -= 10 * 864e5; fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
+  const idx = c.index(); idx.m4.finished -= 20 * 864e5; fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
   const before = crypto.createHash("sha1").update(fs.readFileSync(path.join(c.out, "snap/m4.json.gz"))).digest("hex");
   c.setCfg({ libs: { m4: { BLURAY: 5, DVD: 5 } }, fail: { "m4:DVD:3": "always500" } });
   const r = c.run(["--only", "m4"]);

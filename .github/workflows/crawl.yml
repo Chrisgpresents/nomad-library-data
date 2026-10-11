@@ -6,7 +6,7 @@ on:
     inputs:
       only: { description: "copy only these library slugs (comma separated); empty = the normal queue", default: "" }
       rate: { description: "gateway requests per second", default: "1.1" }
-      parallel: { description: "requests in flight", default: "2" }
+      parallel: { description: "requests in flight (the rate limit sets the real pace; slow libraries need more in flight)", default: "4" }
 concurrency: { group: crawl, cancel-in-progress: false }
 permissions: { contents: write }
 jobs:
@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 350
     env:
       RATE: ${{ inputs.rate || '1.1' }}
-      PARALLEL: ${{ inputs.parallel || '2' }}
+      PARALLEL: ${{ inputs.parallel || '4' }}
       ONLY: ${{ inputs.only }}
       REPO_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
     steps:

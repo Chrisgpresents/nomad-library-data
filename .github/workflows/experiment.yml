@@ -1,0 +1,20 @@
+name: Experiment (dry run, never publishes)
+on:
+  workflow_dispatch:
+    inputs:
+      slug: { description: "library slug", default: "aclibrary" }
+      rate: { description: "gateway requests per second", default: "3" }
+      parallel: { description: "requests in flight", default: "4" }
+      minutes: { description: "time budget", default: "20" }
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env: { RATE: "${{ inputs.rate }}", PARALLEL: "${{ inputs.parallel }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: |
+          curl -s https://api.ipify.org | sed 's/^/runner address: /'
+          node crawl.mjs --dry --out /tmp/x --state /tmp/xs --only "${{ inputs.slug }}" --budget-min "${{ inputs.minutes }}"

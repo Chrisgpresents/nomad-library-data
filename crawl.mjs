@@ -133,7 +133,7 @@ async function crawlLibrary(slug) {
     take(first, f, rows, seen, ids);
     total += pages;
     for (let n = 2; n <= pages; n += PARALLEL) {
-      if (Date.now() - T0 > BUDGET + 20 * 60e3) throw new Error("out of time");
+      if (Date.now() - T0 > BUDGET + 15 * 60e3) throw new Error("out of time");
       const batch = Array.from({ length: Math.min(PARALLEL, pages - n + 1) }, (_, i) => n + i);
       const got = await Promise.allSettled(batch.map(p => getJson(pageUrl(slug, fmt, p), 3)));
       for (const g of got) { if (g.status === "fulfilled") take(g.value, f, rows, seen, ids); else bad++; }
@@ -165,6 +165,7 @@ const stale = Date.now() - STALE_DAYS * 864e5;
 want = want.filter(s => !index[s] || index[s].finished < stale || ONLY)
   .sort((a, b) => (index[a]?.finished || 0) - (index[b]?.finished || 0));
 console.log(`${all.size} libraries known, ${want.length} to copy, ${Object.keys(index).length} already copied`);
+if (!want.length) process.exit(3);
 
 let done = 0, failed = 0;
 for (const slug of want) {

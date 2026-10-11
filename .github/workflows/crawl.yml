@@ -1,33 +1,67 @@
 name: Copy library catalogs
 on:
   schedule:
-    - cron: "17 */3 * * *"   # every 3 hours: adds newly requested libraries, refreshes any copy older than 6 days
+    - cron: "17 */3 * * *"        # every 3 hours; a run chains several 15 minute slices and resumes saved progress
   workflow_dispatch:
+    inputs:
+      rate: { description: "gateway requests per second", default: "3" }
+      parallel: { description: "requests in flight", default: "4" }
 concurrency: { group: crawl, cancel-in-progress: false }
 permissions: { contents: write }
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 345
+    timeout-minutes: 350
+    env:
+      RATE: ${{ inputs.rate || '3' }}
+      PARALLEL: ${{ inputs.parallel || '4' }}
+      REPO_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - name: Load the copies made so far
+      - name: Load published copies and saved progress
         run: |
-          REPO="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
-          git clone --depth 1 --branch gh-pages "$REPO" out || { mkdir out && git -C out init -q && git -C out remote add origin "$REPO"; }
-      - name: Copy catalogs, publishing every ~20 minutes
-        run: |
-          publish() {
-            ( cd out && touch .nojekyll \
-              && git config user.name "library-copier" && git config user.email "noreply@users.noreply.github.com" \
-              && git checkout -q --orphan "p$RANDOM" && git add -A \
-              && git commit -q -m "Catalog copies $(date -u +%F)" \
-              && git push -q -f origin HEAD:gh-pages ) || true
-          }
-          for i in $(seq 1 13); do
-            rc=0; node crawl.mjs --out out --budget-min 20 || rc=$?
-            publish
-            [ "$rc" = 3 ] && break
+          set -euo pipefail
+          for pair in "gh-pages out" "state state"; do
+            set -- $pair
+            if git ls-remote --exit-code --heads "$REPO_URL" "$1" >/dev/null 2>&1; then git clone -q --depth 1 --branch "$1" "$REPO_URL" "$2"
+            else mkdir "$2" && git -C "$2" init -q && git -C "$2" remote add origin "$REPO_URL"; fi
           done
+      - name: Copy catalogs (slices of 15 minutes, saved and published after each)
+        run: |
+          set -uo pipefail
+          push_orphan() {   # dir branch message
+            ( cd "$1" && git config user.name library-copier && git config user.email noreply@users.noreply.github.com \
+              && git checkout -q --orphan "p$RANDOM$RANDOM" && git add -A && git commit -q --allow-empty -m "$3" ) || return 1
+            for t in 1 2 3; do ( cd "$1" && git push -q -f origin HEAD:"$2" ) && return 0; sleep 8; done
+            echo "::error::could not push $2"; return 1
+          }
+          START=$(date +%s); FAIL=0; PUBLISHED=0
+          for i in $(seq 1 24); do
+            rc=0; node crawl.mjs --out out --state state --budget-min 15 || rc=$?
+            if [ "$rc" != 3 ]; then
+              echo "{\"run\":\"$GITHUB_RUN_ID\",\"at\":\"$(date -u +%FT%TZ)\"}" > out/snap/published.json
+              touch out/.nojekyll
+              push_orphan state state "Saved progress $(date -u +%FT%TZ)" || FAIL=1
+              push_orphan out gh-pages "Catalog copies $(date -u +%FT%TZ)" || FAIL=1
+              PUBLISHED=1
+            fi
+            case "$rc" in
+              3) break ;;
+              4) FAIL=1 ;;
+              5) FAIL=1; echo "::error::blocked by the library gateway, stopping this run"; break ;;
+            esac
+            [ $(( $(date +%s) - START )) -gt 19500 ] && { echo "time cap reached, the rest continues next run"; break; }
+          done
+          echo "PUBLISHED=$PUBLISHED" >> "$GITHUB_ENV"
+          [ "$FAIL" = 0 ]
+      - name: Confirm the published files are really live
+        if: env.PUBLISHED == '1' && always()
+        run: |
+          for t in $(seq 1 30); do
+            got=$(curl -fsS "https://chrisgpresents.github.io/nomad-library-data/snap/published.json?x=$RANDOM" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['run'])" 2>/dev/null || true)
+            [ "$got" = "$GITHUB_RUN_ID" ] && { echo "live: run $got"; exit 0; }
+            sleep 20
+          done
+          echo "::error::GitHub Pages did not serve this run's files within 10 minutes"; exit 1

@@ -344,7 +344,7 @@ for (const q of queue) {
     log(`ok     ${slug}: ${r.total} titles, ${(r.bytes / 1e6).toFixed(2)} MB gz, ${stats.pages - p0} pages, ${secs}s`);
   } else if (r.result === "paused") {
     const have = Object.entries(st.fmts).reduce((n, [f, v]) => n + st.done[f].size, 0), tot = Object.values(st.fmts).reduce((n, v) => n + v.pages, 0);
-    status.libraries[slug] = { ...meta, state: "in progress", name, pagesDone: have, pagesKnown: tot };
+    status.libraries[slug] = { ...meta, state: "in progress", name, pagesDone: have, pagesKnown: tot, formatsKnown: Object.keys(st.fmts).length };
     log(`paused ${slug}: ${have} pages saved, will resume next run`);
     paused = true; break;
   } else if (r.result === "blocked") {

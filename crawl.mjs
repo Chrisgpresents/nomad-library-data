@@ -20,7 +20,7 @@ const PAR = +(process.env.PARALLEL || 4);
 const STALE_MS = +(process.env.STALE_DAYS || 14) * 864e5;
 const MAX_ATTEMPTS = 8;                      // after this many failed runs a library is parked as "stuck" and shown in status
 const backoffMs = n => Math.min(6 * 36e5 * n, 48 * 36e5);   // 6 h, 12 h, 18 h ... capped at 48 h between tries of a failing library
-const ALWAYS = { bclsnj: "Burlington County Library System", chipublib: "Chicago Public Library", seattle: "The Seattle Public Library", nypl: "The New York Public Library" };
+// Scheduled copies come only from visitor requests. --only is an explicit manual override.
 
 const arg = (n, d) => { const i = process.argv.indexOf("--" + n); return i > 0 ? process.argv[i + 1] : d; };
 const OUT = arg("out", "out"), STATE = arg("state", "state"), ONLY = arg("only", ""), DRY = process.argv.includes("--dry");
@@ -287,7 +287,7 @@ async function wantedList() {
     const d = await getJson(SITE + "/api/want", { tries: 3 });
     if (!Array.isArray(d?.wanted)) throw new Error("answer is not the wanted-list format (old site still deployed?)");
     return d.wanted;
-  } catch (e) { log(`::warning::wanted list unavailable (${e.message}); only the quick-pick libraries will be copied`); return null; }
+  } catch (e) { log(`::warning::wanted list unavailable (${e.message}); no automatic copies will be started`); return null; }
 }
 
 // ---- main ---------------------------------------------------------------------------------------
@@ -300,7 +300,8 @@ let reqsAtRecovery = 0;
 const now = Date.now();
 
 const wanted = await wantedList();
-const names = new Map(Object.entries(ALWAYS)), asked = new Map(Object.keys(ALWAYS).map(s => [s, 0]));
+if (wanted === null && !ONLY) process.exit(4);
+const names = new Map(), asked = new Map();
 for (const [slug, name, at] of wanted || []) { names.set(slug, name || slug); asked.set(slug, at || 1); }
 let candidates = ONLY ? ONLY.split(",") : [...names.keys()];
 const queue = [], waiting = [];

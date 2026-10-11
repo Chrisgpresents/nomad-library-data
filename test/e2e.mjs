@@ -109,7 +109,7 @@ await scenario("403 block: stop quickly, keep progress, exit 5", { libs: { m6: {
   ok(r.code === 5, `exit 5 = blocked (got ${r.code})`);
   ok(/BLOCKED/.test(r.log), "log says BLOCKED");
   const h = await c.hits();
-  ok(h.blocked <= 12, `did not keep hammering after the block (${h.blocked} blocked requests)`);
+  ok(h.blocked <= 22, `only the 2 failed batches plus one probe per 300 ms hit the block (${h.blocked} blocked requests)`);
   ok(c.has(path.join(c.state, "m6.json")) && !c.has(path.join(c.out, "snap/m6.json.gz")), "progress saved, nothing published");
   ok(/blocked/.test(c.status().libraries.m6.state), "status says blocked");
 });

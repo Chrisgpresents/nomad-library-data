@@ -105,11 +105,13 @@ async function getJson(url, tries = 4) {
   let last;
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
-      if (r.ok) return await r.json();
+      const t0 = Date.now();
+      const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(25e3) });
+      if (r.ok) { const j = await r.json(); if (Date.now() - t0 > 6e3) console.log(`slow ${((Date.now() - t0) / 1e3).toFixed(0)}s ${url.slice(-60)}`); return j; }
+      console.log(`http ${r.status} try ${i + 1} ${url.slice(-70)}`);
       last = new Error(`${r.status} ${url}`);
       if (r.status === 404 || r.status === 400) break;
-    } catch (e) { last = e; }
+    } catch (e) { last = e; console.log(`err ${e.name} try ${i + 1} ${url.slice(-70)}`); }
     await sleep(600 * (i + 1) ** 2);
   }
   throw last;

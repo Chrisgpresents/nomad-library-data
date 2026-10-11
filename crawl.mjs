@@ -16,7 +16,7 @@ const SITE = process.env.SITE_BASE || "https://library.nomadovernormal.com";
 const GW = process.env.GATEWAY_BASE || "https://gateway.bibliocommons.com/v2/libraries";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 const FMTS = [["BLURAY", "b"], ["DVD", "d"], ["VIDEO_GAME", "g"]];
-const PAR = +(process.env.PARALLEL || 2);
+const PAR = +(process.env.PARALLEL || 4);
 const STALE_MS = +(process.env.STALE_DAYS || 14) * 864e5;
 const MAX_ATTEMPTS = 8;                      // after this many failed runs a library is parked as "stuck" and shown in status
 const backoffMs = n => Math.min(6 * 36e5 * n, 48 * 36e5);   // 6 h, 12 h, 18 h ... capped at 48 h between tries of a failing library

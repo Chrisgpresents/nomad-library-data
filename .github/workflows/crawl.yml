@@ -1,9 +1,9 @@
 name: Copy library catalogs
 on:
-  schedule:
-    - cron: "17 */3 * * *"        # every 3 hours; a run chains several 15 minute slices and resumes saved progress
+  # schedule is added back once the gateway's request allowance has been measured (see README, "Capacity")
   workflow_dispatch:
     inputs:
+      only: { description: "copy only these library slugs (comma separated); empty = the normal queue", default: "" }
       rate: { description: "gateway requests per second", default: "3" }
       parallel: { description: "requests in flight", default: "4" }
 concurrency: { group: crawl, cancel-in-progress: false }
@@ -15,6 +15,7 @@ jobs:
     env:
       RATE: ${{ inputs.rate || '3' }}
       PARALLEL: ${{ inputs.parallel || '4' }}
+      ONLY: ${{ inputs.only }}
       REPO_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
     steps:
       - uses: actions/checkout@v4
@@ -37,9 +38,10 @@ jobs:
             for t in 1 2 3; do ( cd "$1" && git push -q -f origin HEAD:"$2" ) && return 0; sleep 8; done
             echo "::error::could not push $2"; return 1
           }
+          ONLY_ARG=""; if [ -n "$ONLY" ]; then case "$ONLY" in *[!a-z0-9,-]*) echo "::error::bad slug list"; exit 1;; esac; ONLY_ARG="--only $ONLY"; fi
           START=$(date +%s); FAIL=0; PUBLISHED=0
           for i in $(seq 1 24); do
-            rc=0; node crawl.mjs --out out --state state --budget-min 15 || rc=$?
+            rc=0; node crawl.mjs --out out --state state --budget-min 15 $ONLY_ARG || rc=$?
             if [ "$rc" != 3 ]; then
               echo "{\"run\":\"$GITHUB_RUN_ID\",\"at\":\"$(date -u +%FT%TZ)\"}" > out/snap/published.json
               touch out/.nojekyll

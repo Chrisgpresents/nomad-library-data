@@ -16,8 +16,8 @@ const SITE = process.env.SITE_BASE || "https://library.nomadovernormal.com";
 const GW = process.env.GATEWAY_BASE || "https://gateway.bibliocommons.com/v2/libraries";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 const FMTS = [["BLURAY", "b"], ["DVD", "d"], ["VIDEO_GAME", "g"]];
-const PAR = +(process.env.PARALLEL || 6);
-const STALE_MS = +(process.env.STALE_DAYS || 6) * 864e5;
+const PAR = +(process.env.PARALLEL || 2);
+const STALE_MS = +(process.env.STALE_DAYS || 14) * 864e5;
 const MAX_ATTEMPTS = 8;                      // after this many failed runs a library is parked as "stuck" and shown in status
 const backoffMs = n => Math.min(6 * 36e5 * n, 48 * 36e5);   // 6 h, 12 h, 18 h ... capped at 48 h between tries of a failing library
 const ALWAYS = { bclsnj: "Burlington County Library System", chipublib: "Chicago Public Library", seattle: "The Seattle Public Library", nypl: "The New York Public Library" };
@@ -93,7 +93,7 @@ function shape(id, b, f, seen) {
 }
 
 // ---- network with bounded retries --------------------------------------------------------------
-const RATE = +(process.env.RATE || 3);      // gateway requests per second across the whole run (a burst of ~8/s got our address blocked)
+const RATE = +(process.env.RATE || 1.1);    // gateway requests per second. Measured 10.11.26: the gateway allows ~480 requests then blocks an address for ~3 min; a steady 1.1/s ran 1,018 requests with no block
 let nextSlot = 0;
 async function slot() { const now = Date.now(), at = Math.max(nextSlot, now); nextSlot = at + 1000 / RATE; if (at > now) await sleep(at - now); }
 const stats = { pages: 0, requests: 0, retries: 0, http429: 0, http403: 0, http5xx: 0, timeouts: 0, busyMs: 0 };

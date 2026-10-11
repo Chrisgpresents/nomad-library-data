@@ -1,7 +1,7 @@
 name: Copy library catalogs
 on:
   schedule:
-    - cron: "23 7 * * *"   # daily: adds newly requested libraries first, refreshes any copy older than 6 days
+    - cron: "17 */3 * * *"   # every 3 hours: adds newly requested libraries, refreshes any copy older than 6 days
   workflow_dispatch:
 concurrency: { group: crawl, cancel-in-progress: false }
 permissions: { contents: write }

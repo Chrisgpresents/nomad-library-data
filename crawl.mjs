@@ -150,14 +150,12 @@ async function crawlLibrary(slug) {
 }
 
 // ---- main ------------------------------------------------------------------------
+// Only libraries someone asked for (plus the quick picks on the home page) are copied.
+const ALWAYS = { bclsnj: "Burlington County Library System", chipublib: "Chicago Public Library", seattle: "The Seattle Public Library", nypl: "The New York Public Library" };
 async function libraryList() {
-  const map = new Map();
-  for (const u of ["/libraries.json", "/api/libs"]) {
-    try {
-      const d = await getJson(SITE + u, 3);
-      for (const x of d) { const [slug, name] = Array.isArray(x) ? x : [x.slug, x.name]; if (slug) map.set(slug, name || slug); }
-    } catch (e) { console.log("list", u, "failed:", e.message); }
-  }
+  const map = new Map(Object.entries(ALWAYS));
+  try { for (const [slug, name] of await getJson(SITE + "/api/libs?wanted=1", 3)) map.set(slug, name || slug); }
+  catch (e) { console.log("wanted list failed:", e.message); }
   return map;
 }
 

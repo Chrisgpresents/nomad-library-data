@@ -26,7 +26,7 @@ export function libFromUrl(url) {
   }
   profile = decodeURIComponent(profile).replace(/[^A-Za-z0-9._-]/g, "-");
   const id = `${system}.${host}_${profile.toLowerCase()}`.replace(/[^a-z0-9._-]/g, "-");
-  return { id, host, base: `${u.origin}/client/${LANG}/${profile}`, profile };
+  return { id, host, base: `https://${u.host.toLowerCase()}/client/${LANG}/${profile}`, profile };
 }
 
 // ---------- helpers ----------

@@ -11,7 +11,7 @@ export function libFromUrl(url) {
   const host = u.hostname.toLowerCase();
   const m = u.pathname.match(/^(.*?\/polaris)(\/|$)/i);
   // hosted PowerPAC (*.polarislibrary.com) lives under /polaris; a bare host link (no path) means that
-  const base = u.origin.toLowerCase() + (m ? m[1] : /^\/?$/.test(u.pathname) || /\.polarislibrary\.com$/i.test(u.hostname) ? "/polaris" : "");   // a bare host means the usual /polaris path
+  const base = "https://" + u.host.toLowerCase() + (m ? m[1] : /^\/?$/.test(u.pathname) || /\.polarislibrary\.com$/i.test(u.hostname) ? "/polaris" : "");   // a bare host means the usual /polaris path
   const ctx = (u.searchParams.get("ctx") || "").toLowerCase();
   const scope = /^[0-9.]+$/.test(ctx) ? ctx.replace(/\./g, "-") : "";
   const id = "polaris." + host + (m && m[1].length > 8 ? "" : "") + (scope ? "_" + scope : "");

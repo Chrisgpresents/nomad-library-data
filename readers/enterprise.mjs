@@ -114,8 +114,18 @@ function pick(facets, test, minPick) {
 
 // ---------- plan ----------
 export async function plan(lib, ctx) {
-  const html = await getText(ctx, `${lib.base}/search/results?qu=&ps=2`);
-  const facets = parseFacets(html);
+  let html = await getText(ctx, `${lib.base}/search/results?qu=&ps=2`);
+  let facets = parseFacets(html);
+  if (!facets.length && lib.profile === "default") {
+    // a bare address (no /client/en_US/<profile>): the site's front door redirects to its real profile
+    const r = await ctx.fetch(new URL(lib.base).origin + "/");
+    const m = String(r.url || "").match(/\/client\/([a-z]{2}_[A-Z]{2})\/([^/?#]+)/);
+    if (m && m[2] !== "default") {
+      lib.base = `${new URL(lib.base).origin}/client/${m[1]}/${m[2]}`;
+      html = await getText(ctx, `${lib.base}/search/results?qu=&ps=2`);
+      facets = parseFacets(html);
+    }
+  }
   if (!facets.length) throw new Error("no facets found on " + lib.base);
   const gamesF = pick(facets, (f) => RE_GAME.test(f.label) && !RE_GAME_NO.test(f.label));
   // ITEMCAT* facets are per-copy tags that libraries use loosely (junk like books tagged "Blu-ray"), so try them last.
@@ -155,6 +165,7 @@ export async function plan(lib, ctx) {
   }
   if (gamesF) add("g", gamesF.map((v) => partOf(v, { plat: platOf(v.label) })));
   if (!out.length) throw new Error("no DVD/Blu-ray/game format found in facets of " + lib.base);
+  for (const t of out) t.base = lib.base;   // so page() reads the same profile
   return out;
 }
 
@@ -235,6 +246,7 @@ async function availability(lib, ctx, keys) {
 }
 
 export async function page(lib, task, n, ctx) {
+  if (task.base) lib.base = task.base;     // the profile plan() found behind a bare address
   let parts = task.parts;
   if (!parts) { // task lost its plan data: rebuild
     const again = (await plan(lib, ctx)).find((p) => p.f === task.f);

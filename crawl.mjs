@@ -208,7 +208,7 @@ function shapeReader(x) {
   const tv = /television|season \d|complete (series|season)|\bseason\b/i.test([subj, x.title, x.sub].join(" ")) ? 1 : 0;
   let plat = "";
   if (x.f === "g") { const hay = [x.title, x.sub, x.plat].join(" "); for (const [re, p] of PLATFORMS) if (re.test(hay)) { plat = p; break; } }
-  return [String(x.id), String(x.title || "").trim(), String(x.sub || "").trim(), x.f, +x.disc || 0, String(x.cover || ""),
+  return [String(x.id), String(x.title || "").trim(), String(x.sub || "").trim(), x.f, +x.disc || 0, /^https?:\/\//.test(String(x.cover || "")) && !/no_image/i.test(x.cover) ? String(x.cover) : "",
     x.avail ? 1 : 0, +x.holds || 0, genres.slice(0, 4).join(","), tv, plat, 0, 0, "", 0];
 }
 async function crawlReader(id, st) {

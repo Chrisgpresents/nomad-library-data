@@ -69,6 +69,7 @@ export async function plan(lib, ctx) {
 }
 
 const clean = s => String(s || "").replace(/\s*\[(videorecording|video recording|electronic resource|game)\]\s*/gi, " ")
+  .replace(/\s*\((dvd|blu-?ray|4k|uhd|video ?game)[^)]{0,30}\)/gi, "")
   .replace(/\s+\/\s.*$/, "").replace(/\s+/g, " ").trim().replace(/[.;,:/\s]+$/, "");
 const yearOf = v => { const m = String(v || "").match(/(19|20)\d{2}/); return m ? +m[0] : 0; };
 const LANG_OK = /^(eng|zxx|und|mul|)$/;

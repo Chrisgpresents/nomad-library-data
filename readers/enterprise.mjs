@@ -137,6 +137,8 @@ export async function plan(lib, ctx) {
     mixed = true;
   }
   if (!dvdF) dvdF = pick(facets, (f) => RE_DVD.test(f.label) && !RE_DVD_NO.test(f.label));
+  // one facet set for both ("DVD / Blu-ray / Video Rated R"): read it as the DVD set, Blu-rays split out by title text
+  if (!dvdF) { dvdF = pick(facets, (f) => RE_DVD.test(f.label) && RE_BLU.test(f.label) && !/player|ppr|public performance/i.test(f.label)); if (dvdF) mixed = true; }
   let bluF = pick(facets, (f) => noCat(f) && RE_BLU.test(f.label));
   if (!bluF && !dvdF) bluF = pick(facets, (f) => RE_BLU.test(f.label));
   if (!bluF) mixed = true;

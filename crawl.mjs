@@ -158,6 +158,124 @@ async function attachRatings(rows) {
   return degraded;
 }
 
+// ---- other catalog systems (readers/<system>.mjs), ids like "vega.sdpl.na5.iiivega.com" ----------------------
+// A reader turns one catalog system's public search into rows. The copier owns pacing and retries (ctx.fetch).
+const isReader = id => id.includes(".");
+const READERS = {};
+async function readerFor(id) {
+  const sys = id.split(".")[0];
+  if (!/^[a-z0-9]+$/.test(sys) || !fs.existsSync(new URL(`./readers/${sys}.mjs`, import.meta.url))) throw Object.assign(new Error(`no reader for ${sys}`), { permanent: true });
+  return (READERS[sys] ||= await import(`./readers/${sys}.mjs`));
+}
+// url: the catalog link a visitor gave (from the wanted list, then kept in the state and the index for refreshes);
+// Polaris and Enterprise need it for the path and the branch/profile that the id only names.
+function readerLib(R, id, url) {
+  const lib = R.libFromUrl(url || "https://" + id.slice(id.indexOf(".") + 1).split("_")[0] + "/");
+  if (!lib || lib.id !== id) throw Object.assign(new Error(`reader does not recognise ${id}`), { permanent: true });
+  return lib;
+}
+const READER_RATE = +(process.env.READER_RATE || 1);   // requests per second to any one library's own catalog
+const hostSlots = new Map();
+function readerCtx(host) {
+  return {
+    log,
+    async fetch(url, init = {}) {
+      let delay = RETRY_BASE, last;
+      for (let i = 0; i < 4; i++) {
+        const now = Date.now(), at = Math.max(hostSlots.get(host) || 0, now);
+        hostSlots.set(host, at + 1000 / READER_RATE); if (at > now) await sleep(at - now);
+        stats.requests++;
+        try {
+          const r = await fetch(url, { ...init, headers: { "User-Agent": UA, ...(init.headers || {}) }, signal: AbortSignal.timeout(60e3) });
+          if (r.ok || (init.redirect === "manual" && r.status >= 300 && r.status < 400)) return r;   // Polaris follows its own redirects for the session cookie
+          last = new Error(`HTTP ${r.status} from ${new URL(url).host}`);
+          if (r.status !== 429 && r.status < 500) throw Object.assign(last, { permanent: true });
+          stats[r.status === 429 ? "http429" : "http5xx"]++;
+        } catch (e) {
+          if (e.permanent) throw e;
+          if (e.name === "TimeoutError" || e.name === "AbortError") stats.timeouts++;
+          last = e;
+        }
+        if (i < 3) { stats.retries++; await sleep(delay); delay = Math.min(delay * 3, 60e3); }
+      }
+      throw last;
+    },
+  };
+}
+function shapeReader(x) {
+  const subj = String(x.subj || "").toLowerCase(), genres = [];
+  for (const [needle, g] of GENRES) if (subj.includes(needle) && !genres.includes(g)) genres.push(g);
+  const tv = /television|season \d|complete (series|season)|\bseason\b/i.test([subj, x.title, x.sub].join(" ")) ? 1 : 0;
+  let plat = "";
+  if (x.f === "g") { const hay = [x.title, x.sub, x.plat].join(" "); for (const [re, p] of PLATFORMS) if (re.test(hay)) { plat = p; break; } }
+  return [String(x.id), String(x.title || "").trim(), String(x.sub || "").trim(), x.f, +x.disc || 0, String(x.cover || ""),
+    x.avail ? 1 : 0, +x.holds || 0, genres.slice(0, 4).join(","), tv, plat, 0, 0, "", 0];
+}
+async function crawlReader(id, st) {
+  const R = await readerFor(id);
+  st.url = st.url || urls.get(id) || index[id]?.url || "";
+  const lib = readerLib(R, id, st.url), ctx = readerCtx(lib.host);
+  if (!st.plan) {
+    st.plan = await R.plan(lib, ctx);
+    if (!st.plan.length) return { result: "failed", error: "the catalog lists no DVDs, Blu-rays or games" };
+    for (const t of st.plan) { t.key = t.key || t.f; st.fmts[t.key] = { pages: Math.max(1, t.pages), count: t.count || 0 }; st.done[t.key] = new Set(); }
+    st.rec = R.recordTemplate(lib); st.sys = R.system;
+    if (R.libraryName) st.libName = await R.libraryName(lib, ctx).catch(() => "") || "";
+    saveState(st);
+  }
+  const P = Math.max(1, +(process.env.READER_PARALLEL || 2));
+  let lastSave = Date.now();
+  for (const t of st.plan) {
+    const F = st.fmts[t.key], done = st.done[t.key];
+    for (let pass = 0; pass < 2; pass++) {
+      const todo = []; for (let n = 1; n <= F.pages; n++) if (!done.has(n)) todo.push(n);
+      if (!todo.length) break;
+      if (pass === 1) { log(`  ${id} ${t.key}: retrying ${todo.length} page(s) once more`); await sleep(PASS_WAIT); }
+      for (let i = 0; i < todo.length; i += P) {
+        if (Date.now() > DEADLINE) { saveState(st); return { result: "paused" }; }
+        const batch = todo.slice(i, i + P);
+        const got = await Promise.allSettled(batch.map(n => R.page(lib, t, n, ctx)));
+        got.forEach((g, k) => {
+          if (g.status !== "fulfilled") { log(`  ${id} ${t.key} page ${batch[k]}: ${g.reason?.message}`); return; }
+          for (const x of g.value) if (x?.id && x.title && !st.ids.has(String(x.id))) { st.ids.add(String(x.id)); st.rows.push(shapeReader({ ...x, f: x.f || t.f })); }
+          done.add(batch[k]); stats.pages++;
+        });
+        if (Date.now() - lastSave > 60e3) { saveState(st); lastSave = Date.now(); }
+      }
+    }
+    const missing = F.pages - done.size;
+    if (missing > 0) { saveState(st); return { result: "failed", error: `${missing} of ${F.pages} ${t.key} pages still failing after retries` }; }
+  }
+  return { result: "done" };
+}
+
+// IMDb genres (public/ix/genres.json on the site, built by tools/build_genres.py) for catalogs with no genre headings.
+const GL = { h: "horror", c: "comedy", a: "action", t: "thriller", k: "crime", d: "drama", n: "animation", f: "family", y: "fantasy",
+  r: "romance", o: "documentary", w: "western", x: "war", m: "musical", b: "biography", i: "history", s: "sports", S: "scifi" };
+let imdbGenres = null;
+async function genreMap() {
+  if (imdbGenres) return imdbGenres;
+  for (let i = 0; i < 3; i++) {
+    try { const r = await fetch(`${SITE}/ix/genres.json`, { signal: AbortSignal.timeout(30e3) }); if (r.ok && /json/i.test(r.headers.get("content-type") || "")) return (imdbGenres = await r.json()); } catch {}
+    await sleep(1000 * 3 ** i);
+  }
+  log("::warning::IMDb genre list unavailable; rows keep catalog genres only");
+  return (imdbGenres = {});
+}
+// all: every row gets IMDb's genres added (catalogs without headings); otherwise only rows with no genres at all
+async function attachGenres(rows, all) {
+  const G = await genreMap();
+  for (const r of rows) {
+    if (!r[13] || (!all && r[8])) continue;
+    const L = G[String(r[13]).replace(/^tt0*/, "")]; if (!L) continue;
+    const have = r[8] ? r[8].split(",") : [];
+    const add = [...L].map(c => GL[c]).filter(Boolean);
+    if (L.includes("r") && L.includes("c")) add.unshift("romcom");
+    for (const g of add) if (!have.includes(g)) have.push(g);
+    r[8] = have.slice(0, 5).join(",");
+  }
+}
+
 // ---- state ------------------------------------------------------------------------------------
 const readJson = (p, d) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return d; } };
 const writeAtomic = (p, data) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p + ".tmp", data); fs.renameSync(p + ".tmp", p); };
@@ -264,6 +382,7 @@ async function finishLibrary(slug, st, name, index) {
   const rows = st.rows;
   const films = rows.filter(r => r[3] !== "g").length;
   const degraded = await attachRatings(rows);
+  await attachGenres(rows, isReader(slug));
   const problems = validate(rows, st, index[slug]);
   if (films >= 500) {
     const rated = rows.filter(r => r[3] !== "g" && r[11]).length;
@@ -272,11 +391,14 @@ async function finishLibrary(slug, st, name, index) {
   if (degraded > rows.length * 0.02) problems.push(`ratings lookup failed for ${degraded} titles`);
   if (problems.length) return { result: "failed", error: "validation: " + problems.join("; ") };
   const finished = Date.now();
-  const raw = `{"ver":${finished},"finished":${finished},"total":${rows.length},"sc":${JSON.stringify(st.sc || "")},"rows":[${rows.map(r => JSON.stringify(r)).join(",")}]}`;
+  // na: this catalog reports no shelf status at all (e.g. older LS2 PAC), so the page must not call everything checked out
+  const na = st.rec && rows.length > 50 && !rows.some(r => r[6]);
+  const extra = st.rec ? `,"rec":${JSON.stringify(st.rec)},"sys":${JSON.stringify(st.sys || "")}${na ? ',"na":1' : ""}` : "";
+  const raw = `{"ver":${finished},"finished":${finished},"total":${rows.length},"sc":${JSON.stringify(st.sc || "")}${extra},"rows":[${rows.map(r => JSON.stringify(r)).join(",")}]}`;
   const gz = zlib.gzipSync(raw, { level: 9 });
   if (!DRY) {
     writeAtomic(path.join(OUT, "snap", slug + ".json.gz"), gz);
-    index[slug] = { name, finished, total: rows.length, bytes: gz.length, rawBytes: raw.length, expected: Object.values(st.fmts).reduce((n, v) => n + v.count, 0), pages: Object.values(st.fmts).reduce((n, v) => n + v.pages, 0) };
+    index[slug] = { name: name === slug && st.libName ? st.libName : name, ...(st.rec ? { rec: st.rec, sys: st.sys, url: st.url || "" } : {}), finished, total: rows.length, bytes: gz.length, rawBytes: raw.length, expected: Object.values(st.fmts).reduce((n, v) => n + v.count, 0), pages: Object.values(st.fmts).reduce((n, v) => n + v.pages, 0) };
   } else writeAtomic(path.join(OUT, "dry", slug + ".json.gz"), gz);
   return { result: "done", total: rows.length, bytes: gz.length };
 }
@@ -301,8 +423,10 @@ const now = Date.now();
 
 const wanted = await wantedList();
 if (wanted === null && !ONLY) process.exit(4);
-const names = new Map(), asked = new Map();
-for (const [slug, name, at] of wanted || []) { names.set(slug, name || slug); asked.set(slug, at || 1); }
+const names = new Map(), asked = new Map(), urls = new Map();
+for (const [slug, name, at, url] of wanted || []) { names.set(slug, name || slug); asked.set(slug, at || 1); if (url) urls.set(slug, url); }
+// manual runs of reader libraries: ONLY_URLS="polaris.x.org_1-1033-0-0-1|https://x.org/polaris/?ctx=1.1033.0.0.1,..."
+for (const p of (process.env.ONLY_URLS || "").split(",").filter(Boolean)) { const i = p.indexOf("|"); if (i > 0) urls.set(p.slice(0, i), p.slice(i + 1)); }
 // libraries already copied stay fresh even if nobody has "requested" them lately (they were requested once)
 for (const [slug, e] of Object.entries(index)) if (!names.has(slug)) { names.set(slug, e.name || slug); asked.set(slug, 0); }
 let candidates = ONLY ? ONLY.split(",") : [...names.keys()];
@@ -311,14 +435,17 @@ for (const slug of candidates) {
   const st0 = readJson(path.join(STATE, slug + ".json"), null);
   const meta = status.libraries[slug] || {};
   const idx = index[slug];
-  const need = !idx ? "new" : (idx.finished < now - STALE_MS ? "refresh" : null);
+  // reader copies are cheap (a few dozen requests) and carry the shelf status the movie page shows, so they refresh every 2 days
+  const stale = isReader(slug) ? +(process.env.READER_STALE_DAYS || 2) * 864e5 : STALE_MS;
+  const need = !idx ? "new" : (idx.finished < now - stale ? "refresh" : null);
   if (!need) continue;
   if (meta.attempts >= MAX_ATTEMPTS && !ONLY) { status.libraries[slug] = { ...meta, state: "stuck" }; continue; }
   if (meta.lastFailAt && now < meta.lastFailAt + backoffMs(meta.attempts || 1) && !ONLY) { waiting.push(slug); continue; }
   queue.push({ slug, need, askedAt: asked.get(slug) ?? 0, finished: idx?.finished || 0, resume: !!st0 });
 }
 // new requests first (oldest request first, so nobody starves), then refreshes oldest copy first
-queue.sort((a, b) => (a.need === b.need ? (a.need === "new" ? a.askedAt - b.askedAt : a.finished - b.finished) : a.need === "new" ? -1 : 1));
+// readers first: their copies take a minute or two and use the library's own catalog, not the BiblioCommons gateway
+queue.sort((a, b) => (isReader(b.slug) - isReader(a.slug)) || (a.need === b.need ? (a.need === "new" ? a.askedAt - b.askedAt : a.finished - b.finished) : a.need === "new" ? -1 : 1));
 log(`${candidates.length} candidate libraries, ${queue.length} to work on (${queue.filter(q => q.need === "new").length} new, ${queue.filter(q => q.need === "refresh").length} refresh), ${waiting.length} waiting out a backoff, ${Object.keys(index).length} copied, budget ${(BUDGET_MS / 6e4).toFixed(0)} min, parallel ${PAR}`);
 if (!queue.length) {
   for (const s of waiting) status.libraries[s] = { ...status.libraries[s], state: "waiting after failures" };
@@ -335,7 +462,7 @@ for (const q of queue) {
   const meta = status.libraries[slug] || { attempts: 0 };
   let r;
   try {
-    r = await crawlLibrary(slug, st);
+    r = isReader(slug) ? await crawlReader(slug, st) : await crawlLibrary(slug, st);
     if (r.result === "done") r = await finishLibrary(slug, st, name, index);
   } catch (e) { saveState(st); r = e.blocked ? { result: "blocked", error: `the library gateway answered 403 (blocked) after ${stats.requests} requests this run` } : { result: "failed", error: e.message }; }
   const secs = ((Date.now() - t) / 1e3).toFixed(0);
@@ -346,7 +473,7 @@ for (const q of queue) {
     log(`ok     ${slug}: ${r.total} titles, ${(r.bytes / 1e6).toFixed(2)} MB gz, ${stats.pages - p0} pages, ${secs}s`);
   } else if (r.result === "paused") {
     const have = Object.entries(st.fmts).reduce((n, [f, v]) => n + st.done[f].size, 0), tot = Object.values(st.fmts).reduce((n, v) => n + v.pages, 0);
-    status.libraries[slug] = { ...meta, state: "in progress", name, pagesDone: have, pagesKnown: tot, formatsKnown: Object.keys(st.fmts).length };
+    status.libraries[slug] = { ...meta, state: "in progress", name, pagesDone: have, pagesKnown: tot, formatsKnown: st.plan ? 3 : Object.keys(st.fmts).length };
     log(`paused ${slug}: ${have} pages saved, will resume next run`);
     paused = true; break;
   } else if (r.result === "blocked") {

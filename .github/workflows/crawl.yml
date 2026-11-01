@@ -1,7 +1,8 @@
 name: Copy library catalogs
 on:
   schedule:
-    - cron: "17 */3 * * *"        # every 3 hours; a run chains 15 minute slices and resumes saved progress
+    - cron: "*/15 * * * *"        # every 15 minutes so a new Vega/Polaris/... library is copied soon after someone asks;
+                                   # a run chains 15 minute slices (readers first in each) and an idle run exits in seconds
   workflow_dispatch:
     inputs:
       only: { description: "copy only these library slugs (comma separated); empty = the normal queue", default: "" }
@@ -39,7 +40,7 @@ jobs:
             for t in 1 2 3; do ( cd "$1" && git push -q -f origin HEAD:"$2" ) && return 0; sleep 8; done
             echo "::error::could not push $2"; return 1
           }
-          ONLY_ARG=""; if [ -n "$ONLY" ]; then case "$ONLY" in *[!a-z0-9,-]*) echo "::error::bad slug list"; exit 1;; esac; ONLY_ARG="--only $ONLY"; fi
+          ONLY_ARG=""; if [ -n "$ONLY" ]; then case "$ONLY" in *[!a-z0-9,._-]*) echo "::error::bad slug list"; exit 1;; esac; ONLY_ARG="--only $ONLY"; fi
           START=$(date +%s); FAIL=0; PUBLISHED=0
           for i in $(seq 1 24); do
             rc=0; node crawl.mjs --out out --state state --budget-min 15 $ONLY_ARG || rc=$?

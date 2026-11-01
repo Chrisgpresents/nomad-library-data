@@ -116,7 +116,7 @@ async function partsOf(lib, f, ctx) {
     parts.push({ lim: l, sort: "PD", pages: Math.ceil(r.total / PAGE), count: r.total });
     // The PAC stops a result list at its retrieval limit (10000 at some libraries, flagged "--partial"). Re-run the
     // same search under other sort orders: each shows a different first 10000, so the union reaches further.
-    if (r.partial) for (const sort of ["TI", "CALL", "AU_PD"]) parts.push({ lim: l, sort, pages: Math.ceil(r.total / PAGE), count: r.total });
+    if (r.partial) for (const sort of ["TI", "CALL", "AU_PD"]) parts.push({ lim: l, sort, pages: Math.ceil(r.total / PAGE), count: 0 });   // same titles in another order: not more catalog
   }
   PARTS.set(key, parts);
   return parts;

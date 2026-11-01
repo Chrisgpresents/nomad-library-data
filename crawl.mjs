@@ -453,8 +453,8 @@ if (!queue.length) {
 }
 
 let failed = 0, doneCount = 0, paused = false, blocked = false;
-for (const q of queue) {
-  if (Date.now() > DEADLINE) { paused = true; break; }
+// one library, start to finish or until the time budget; -> "stop" ends that line of work
+async function workOn(q) {
   const { slug } = q, name = names.get(slug) || slug, t = Date.now(), p0 = stats.pages;
   let st = loadState(slug);
   if (st && q.need === "refresh" && st.startedAt < index[slug]?.finished) st = null;   // state older than the current copy
@@ -475,18 +475,35 @@ for (const q of queue) {
     const have = Object.entries(st.fmts).reduce((n, [f, v]) => n + st.done[f].size, 0), tot = Object.values(st.fmts).reduce((n, v) => n + v.pages, 0);
     status.libraries[slug] = { ...meta, state: "in progress", name, pagesDone: have, pagesKnown: tot, formatsKnown: st.plan ? 3 : Object.keys(st.fmts).length };
     log(`paused ${slug}: ${have} pages saved, will resume next run`);
-    paused = true; break;
+    paused = true; return "stop";
   } else if (r.result === "blocked") {
     blocked = true; failed++;
     status.libraries[slug] = { ...meta, state: "in progress, run blocked by the library gateway", name, error: r.error, blockedAt: new Date().toISOString() };
     log(`::error::BLOCKED while copying ${slug}: ${r.error}. Progress is saved; stopping this run.`);
-    break;
+    return "stop";
   } else {
     failed++;
     status.libraries[slug] = { state: "failing", name, attempts: (meta.attempts || 0) + 1, lastFailAt: Date.now(), error: r.error };
     log(`::error::${slug} failed (attempt ${(meta.attempts || 0) + 1}): ${r.error}`);
   }
+  return "next";
 }
+// BiblioCommons libraries share one gateway, so one at a time. Reader libraries each use their own library's catalog,
+// so several run side by side (READER_POOL), paced per host, beside the BiblioCommons line.
+const bcQueue = queue.filter(q => !isReader(q.slug)), rdQueue = queue.filter(q => isReader(q.slug));
+async function bcLine() {
+  for (const q of bcQueue) {
+    if (Date.now() > DEADLINE) { paused = true; return; }
+    if ((await workOn(q)) === "stop") return;
+  }
+}
+async function readerLine() {
+  while (rdQueue.length) {
+    if (Date.now() > DEADLINE) { paused = true; return; }
+    if ((await workOn(rdQueue.shift())) === "stop") return;
+  }
+}
+await Promise.all([bcLine(), ...Array.from({ length: Math.max(1, +(process.env.READER_POOL || 6)) }, readerLine)]);
 for (const s of waiting) status.libraries[s] = { ...status.libraries[s], state: "waiting after failures" };
 writeStatus(failed);
 log(`summary: ${doneCount} copied, ${failed} failed, ${paused ? "paused at time budget" : "queue finished"}, ${stats.pages} pages in ${((Date.now() - T0) / 6e4).toFixed(1)} min, ${stats.retries} retries, ${stats.http429} x 429, ${stats.http403} x 403, ${stats.http5xx} x 5xx, ${stats.timeouts} timeouts`);

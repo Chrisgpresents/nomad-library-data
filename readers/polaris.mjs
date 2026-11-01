@@ -10,7 +10,8 @@ export function libFromUrl(url) {
   if (!/^https?:$/.test(u.protocol) || !u.hostname.includes(".")) return null;
   const host = u.hostname.toLowerCase();
   const m = u.pathname.match(/^(.*?\/polaris)(\/|$)/i);
-  const base = u.origin.toLowerCase() + (m ? m[1] : "");
+  // hosted PowerPAC (*.polarislibrary.com) lives under /polaris; a bare host link (no path) means that
+  const base = u.origin.toLowerCase() + (m ? m[1] : /\.polarislibrary\.com$/i.test(u.hostname) ? "/polaris" : "");
   const ctx = (u.searchParams.get("ctx") || "").toLowerCase();
   const scope = /^[0-9.]+$/.test(ctx) ? ctx.replace(/\./g, "-") : "";
   const id = "polaris." + host + (m && m[1].length > 8 ? "" : "") + (scope ? "_" + scope : "");

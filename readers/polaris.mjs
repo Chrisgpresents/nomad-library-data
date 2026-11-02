@@ -92,14 +92,16 @@ async function limits(lib, ctx) {
   if (res.status >= 400) throw new Error("HTTP " + res.status + " advanced search page");
   const html = await res.text();
   const out = { b: [], d: [], g: [] };
-  for (const m of html.matchAll(/<option[^>]*value="TOM=([a-z0-9]{2,4})"[^>]*>\s*([^<]*)/gi)) {
-    const code = m[1].toLowerCase(), label = m[2].replace(/^[-\s]+/, "").replace(/\s+/g, " ").trim();
-    if (/blu/i.test(label) && !/\band\b.*dvd|dvd.*\band\b/i.test(label)) out.b.push(code);
-    else if (/^dvd$/i.test(label)) out.d.push(code);
-    else if (/video ?games?/i.test(label)) out.g.push(code);
+  // value is "TOM=dvd", or the library's own wider filter: "TOM=brd AND AB={list}1,2{/list}", "(TOM=dvd OR TOM=vid) AND AB=..."
+  for (const m of html.matchAll(/<option[^>]*value="([^"]*\bTOM=[a-z0-9]{2,4}[^"]*)"[^>]*>\s*([^<]*)/gi)) {
+    const val = dec(m[1]), label = m[2].replace(/^[-\s]+/, "").replace(/\s+/g, " ").trim();
+    if (/TOM=\*/.test(val)) continue;
+    const vs = [/^TOM=[a-z0-9]{2,4}$/i.test(val) ? "TOM=" + val.slice(4).toLowerCase() : val];   // "(TOM=dvd OR TOM=vid) AND ...": split in partsOf if ignored
+    const into = /blu/i.test(label) && !/\band\b.*dvd|dvd.*\band\b/i.test(label) ? out.b : /^dvds?( discs?)?$/i.test(label) ? out.d : /video ?games?/i.test(label) ? out.g : null;
+    if (into) into.push(...vs);
   }
   const lim = {};
-  for (const f of ["b", "d", "g"]) if (out[f].length) lim[f] = out[f].map((c) => "TOM=" + c); // one search per code ("OR" is not honoured everywhere)
+  for (const f of ["b", "d", "g"]) if (out[f].length) lim[f] = [...new Set(out[f])]; // one search per option ("OR" is not honoured everywhere)
   LIMIT_CACHE.set(lib.id, lim);
   return lim;
 }
@@ -110,9 +112,23 @@ async function partsOf(lib, f, ctx) {
   if (PARTS.has(key)) return PARTS.get(key);
   const lim = await limits(lib, ctx);
   const parts = [];
-  for (const l of lim[f] || []) {
+  // a filter the PAC ignores answers the whole catalog (books too): measure that once and skip such searches
+  const allKey = lib.id + "|*";
+  const ids = (h) => [...h.matchAll(/title\.aspx\?[^"]*\bcn=(\d+)/gi)].map((m) => m[1]).slice(0, 20).join(",");
+  if (!PARTS.has(allKey)) PARTS.set(allKey, ids((await results(lib, "TOM=*", 1, ctx, true)).html));
+  const all = PARTS.get(allKey);
+  const ignored = (r) => !!all && ids(r.html) === all;   // same first records as "all formats" = the filter did nothing
+  const queue = [...(lim[f] || [])];
+  while (queue.length) {
+    const l = queue.shift();
     const r = await results(lib, l, 1, ctx, true);
     if (!r.total) continue;
+    if (ignored(r)) {
+      const or = l.match(/^\(([^)]*)\)(.*)$/);   // OR not honoured here: one search per code
+      if (or) queue.unshift(...or[1].split(/\s+OR\s+/i).map((c) => c.trim() + or[2]));
+      else ctx.log(`  polaris ${lib.host}: filter ${l.slice(0, 40)} answers the whole catalog, skipped`);
+      continue;
+    }
     parts.push({ lim: l, sort: "PD", pages: Math.ceil(r.total / PAGE), count: r.total });
     // The PAC stops a result list at its retrieval limit (10000 at some libraries, flagged "--partial"). Re-run the
     // same search under other sort orders: each shows a different first 10000, so the union reaches further.

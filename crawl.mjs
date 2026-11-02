@@ -483,6 +483,8 @@ async function workOn(q) {
     return "stop";
   } else {
     failed++;
+    // a reader retry starts over: a saved plan would keep yesterday's counts and filters after the reader is fixed
+    if (isReader(slug)) fs.rmSync(path.join(STATE, slug + ".json"), { force: true });
     status.libraries[slug] = { state: "failing", name, attempts: (meta.attempts || 0) + 1, lastFailAt: Date.now(), error: r.error };
     log(`::error::${slug} failed (attempt ${(meta.attempts || 0) + 1}): ${r.error}`);
   }

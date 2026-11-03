@@ -509,7 +509,9 @@ await Promise.all([bcLine(), ...Array.from({ length: Math.max(1, +(process.env.R
 for (const s of waiting) status.libraries[s] = { ...status.libraries[s], state: "waiting after failures" };
 writeStatus(failed);
 log(`summary: ${doneCount} copied, ${failed} failed, ${paused ? "paused at time budget" : "queue finished"}, ${stats.pages} pages in ${((Date.now() - T0) / 6e4).toFixed(1)} min, ${stats.retries} retries, ${stats.http429} x 429, ${stats.http403} x 403, ${stats.http5xx} x 5xx, ${stats.timeouts} timeouts`);
-process.exit(blocked ? 5 : failed ? 4 : 0);
+// 5 = the gateway blocked us (stop this run), 6 = some libraries failed (normal: each waits out a backoff and is
+// retried), 4 = the want list could not be read. Only 4 and crashes mean the copier itself is broken.
+process.exit(blocked ? 5 : failed ? 6 : 0);
 
 function writeStatus(failedCount) {
   if (DRY) return;

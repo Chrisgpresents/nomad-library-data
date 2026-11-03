@@ -82,7 +82,7 @@ await scenario("a failing page: no publish, old copy kept, only that page retrie
   const before = crypto.createHash("sha1").update(fs.readFileSync(path.join(c.out, "snap/m4.json.gz"))).digest("hex");
   c.setCfg({ libs: { m4: { BLURAY: 5, DVD: 5 } }, fail: { "m4:DVD:3": "always500" } });
   const r = c.run(["--only", "m4"]);
-  ok(r.code === 4, `refresh exits 4 when a page keeps failing (got ${r.code})`);
+  ok(r.code === 6, `refresh exits 6 when a page keeps failing (got ${r.code})`);
   const after = crypto.createHash("sha1").update(fs.readFileSync(path.join(c.out, "snap/m4.json.gz"))).digest("hex");
   ok(before === after, "the previous complete copy is untouched");
   ok(c.has(path.join(c.state, "m4.json")), "progress kept");
@@ -97,7 +97,7 @@ await scenario("a failing page: no publish, old copy kept, only that page retrie
 
 await scenario("fair queue: a failing library backs off and does not starve a newer request", { libs: { m4: { BLURAY: 2, DVD: 2 }, m5: { BLURAY: 2, DVD: 2 }, ...quick }, fail: { "m4:DVD:1": "always500" }, wanted: [["m4", "Mock Four", 1], ["m5", "Mock Five", 2]] }, async c => {
   const r = c.run();
-  ok(r.code === 4, `run is red because m4 failed (exit ${r.code})`);
+  ok(r.code === 6, `exit 6 (library failed, copier fine) because m4 failed (exit ${r.code})`);
   ok(c.has(path.join(c.out, "snap/m5.json.gz")), "m5, asked for later, still got copied");
   const h1 = (await c.hits()).byKey["m4:DVD:1"];
   const r2 = c.run();
@@ -134,7 +134,7 @@ await scenario("a block that never lifts: gives up inside the budget, keeps prog
 
 await scenario("thin catalog fails validation instead of publishing", { libs: { m9: { BLURAY: 6, DVD: 6, thin: true } } }, async c => {
   const r = c.run(["--only", "m9"]);
-  ok(r.code === 4 && /validation/.test(r.log), `rejected (exit ${r.code})`);
+  ok(r.code === 6 && /validation/.test(r.log), `rejected (exit ${r.code})`);
   ok(!c.has(path.join(c.out, "snap/m9.json.gz")), "nothing published");
 });
 

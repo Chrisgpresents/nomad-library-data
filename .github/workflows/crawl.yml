@@ -19,6 +19,11 @@ jobs:
       PARALLEL: ${{ inputs.parallel || '4' }}
       ONLY: ${{ inputs.only }}
       REPO_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+      # Copies are served by Cloudflare Pages (no total size cap; GitHub Pages stops at 1 GB). The gh-pages branch is
+      # only the durable store the next run loads from; the GitHub Pages site itself is switched off.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: b2e213e3c7454d17fdfaf60ecde63e27
+      COPIES_URL: https://nomad-library-copies.pages.dev
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,6 +45,13 @@ jobs:
             for t in 1 2 3; do ( cd "$1" && git push -q -f origin HEAD:"$2" ) && return 0; sleep 8; done
             echo "::error::could not push $2"; return 1
           }
+          deploy_cf() {   # publish out/ to Cloudflare Pages; only changed files are uploaded
+            [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "::warning::no CLOUDFLARE_API_TOKEN secret, copies not published"; return 0; }
+            mkdir -p site && rsync -a --delete --exclude=.git out/ site/ || return 1
+            printf '/*\n  Access-Control-Allow-Origin: *\n  Access-Control-Expose-Headers: content-length, etag\n  X-Robots-Tag: noindex\n' > site/_headers
+            for t in 1 2 3; do npx -y wrangler@4.157.0 pages deploy site --project-name nomad-library-copies --branch main --commit-dirty=true >deploy.log 2>&1 && { tail -1 deploy.log; return 0; }; tail -5 deploy.log; sleep 20; done
+            echo "::error::could not publish to Cloudflare Pages"; return 1
+          }
           ONLY_ARG=""; if [ -n "$ONLY" ]; then case "$ONLY" in *[!a-z0-9,._-]*) echo "::error::bad slug list"; exit 1;; esac; ONLY_ARG="--only $ONLY"; fi
           START=$(date +%s); FAIL=0; PUBLISHED=0
           for i in $(seq 1 24); do
@@ -49,26 +61,30 @@ jobs:
               touch out/.nojekyll
               push_orphan state state "Saved progress $(date -u +%FT%TZ)" || FAIL=1
               push_orphan out gh-pages "Catalog copies $(date -u +%FT%TZ)" || FAIL=1
+              deploy_cf || FAIL=1
               PUBLISHED=1
             fi
+            # 0 = slice done, 6 = some libraries failed (each is retried after a backoff; not a broken copier),
+            # 5 = gateway block (stop, resume next run), 3 = nothing to do. Anything else (4, a crash) is a real failure.
             case "$rc" in
+              0|6) ;;
               3) break ;;
-              4) FAIL=1 ;;
-              5) FAIL=1; echo "::error::blocked by the library gateway, stopping this run"; break ;;
+              5) echo "::warning::blocked by the library gateway, stopping this run (it resumes next run)"; break ;;
+              *) FAIL=1; echo "::error::the copier stopped with code $rc" ;;
             esac
             [ $(( $(date +%s) - START )) -gt 19500 ] && { echo "time cap reached, the rest continues next run"; break; }
           done
           echo "PUBLISHED=$PUBLISHED" >> "$GITHUB_ENV"
           [ "$FAIL" = 0 ]
       - name: Confirm the published files are really live
-        if: env.PUBLISHED == '1' && always()
+        if: env.PUBLISHED == '1' && env.CLOUDFLARE_API_TOKEN != '' && always()
         run: |
           for t in $(seq 1 30); do
-            got=$(curl -fsS "https://chrisgpresents.github.io/nomad-library-data/snap/published.json?x=$RANDOM" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['run'])" 2>/dev/null || true)
+            got=$(curl -fsS "$COPIES_URL/snap/published.json?x=$RANDOM" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['run'])" 2>/dev/null || true)
             [ "$got" = "$GITHUB_RUN_ID" ] && { echo "live: run $got"; exit 0; }
             sleep 20
           done
-          echo "::error::GitHub Pages did not serve this run's files within 10 minutes"; exit 1
+          echo "::error::Cloudflare Pages did not serve this run's files within 10 minutes"; exit 1
       - name: Keep the schedule from being switched off after 60 quiet days
         if: github.event_name == 'schedule' && always()
         run: |

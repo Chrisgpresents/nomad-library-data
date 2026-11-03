@@ -99,12 +99,12 @@ const RATE = +(process.env.RATE || 1.1);    // gateway requests per second. Meas
 let nextSlot = 0;
 async function slot() { const now = Date.now(), at = Math.max(nextSlot, now); nextSlot = at + 1000 / RATE; if (at > now) await sleep(at - now); }
 const stats = { pages: 0, requests: 0, retries: 0, http429: 0, http403: 0, http5xx: 0, timeouts: 0, busyMs: 0 };
-async function getJson(url, { tries = 4, timeout = 25e3, limit = false } = {}) {
+async function getJson(url, { tries = 4, timeout = 25e3, limit = false, headers = {} } = {}) {
   let delay = RETRY_BASE, last;
   for (let i = 0; i < tries; i++) {
     try {
       if (limit) { await slot(); stats.requests++; }
-      const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(timeout) });
+      const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json", ...headers }, signal: AbortSignal.timeout(timeout) });
       if (r.ok) return await r.json();
       last = new Error(`HTTP ${r.status}`);
       if (r.status === 403) { stats.http403++; last.blocked = true; throw last; }   // do not hammer a block: report it to the caller
@@ -444,7 +444,7 @@ async function finishLibrary(slug, st, name, index) {
 // ---- which libraries, in what order ------------------------------------------------------------
 async function wantedList() {
   try {
-    const d = await getJson(SITE + "/api/want", { tries: 3 });
+    const d = await getJson(SITE + "/api/want", { tries: 3, headers: { "x-want-key": process.env.WANT_KEY || "" } });   // the list is private
     if (!Array.isArray(d?.wanted)) throw new Error("answer is not the wanted-list format (old site still deployed?)");
     return d.wanted;
   } catch (e) { log(`::warning::wanted list unavailable (${e.message}); no automatic copies will be started`); return null; }
@@ -456,6 +456,7 @@ const idxPath = path.join(OUT, "snap", "index.json"), statusPath = path.join(OUT
 const index = readJson(idxPath, {});
 const status = readJson(statusPath, { libraries: {} });
 status.gateway = status.gateway || { blocks: [] };
+for (const v of Object.values(status.libraries)) if (v && v.error) v.error = cleanError(v.error);   // older runs published raw page text
 let reqsAtRecovery = 0;
 const now = Date.now();
 

@@ -11,6 +11,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import dns from "node:dns/promises";
+import net from "node:net";
 
 const SITE = process.env.SITE_BASE || "https://library.nomadovernormal.com";
 const GW = process.env.GATEWAY_BASE || "https://gateway.bibliocommons.com/v2/libraries";
@@ -174,6 +176,42 @@ function readerLib(R, id, url) {
   if (!lib || lib.id !== id) throw Object.assign(new Error(`reader does not recognise ${id}`), { permanent: true });
   return lib;
 }
+// ---- catalog links come from visitors, so every address (and every redirect hop) must be a public internet host:
+// never loopback, private, link-local (cloud metadata), CGNAT, multicast or reserved space, by name or by IP.
+function privateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19));
+  }
+  const x = ip.toLowerCase();
+  const m = x.match(/^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/); if (m) return privateIp(m[1]);
+  return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("2001:db8") || x.startsWith("::ffff:");
+}
+async function assertPublic(url) {
+  const u = new URL(url);
+  if (u.protocol !== "https:" && u.protocol !== "http:") throw Object.assign(new Error("refused: not a web address"), { permanent: true });
+  if (u.username || u.password) throw Object.assign(new Error("refused: address carries a login"), { permanent: true });
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  const addrs = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true, verbatim: true });
+  if (!addrs.length || addrs.some(a => privateIp(a.address))) throw Object.assign(new Error("refused: not a public internet address"), { permanent: true });
+}
+// fetch that checks the address first and follows redirects by hand, checking each hop
+async function publicFetch(url, init = {}) {
+  let cur = url;
+  for (let hop = 0; hop < 8; hop++) {
+    await assertPublic(cur);
+    const r = await fetch(cur, { ...init, redirect: "manual" });
+    if (init.redirect === "manual" || r.status < 300 || r.status >= 400 || !r.headers.get("location")) return r;
+    cur = new URL(r.headers.get("location"), cur).href;
+    if (r.status === 303 || ((r.status === 301 || r.status === 302) && init.method && init.method !== "GET" && init.method !== "HEAD")) init = { ...init, method: "GET", body: undefined };
+  }
+  throw Object.assign(new Error("refused: too many redirects"), { permanent: true });
+}
+// errors are published (status.json, public Actions logs): never echo what a remote page said, only our own words
+function cleanError(msg) {
+  return String(msg || "failed").replace(/\s*\(\d+ bytes\):[\s\S]*$/, "").replace(/<[^>]*>?/g, "").replace(/\s+/g, " ").trim().slice(0, 140);
+}
 const READER_RATE = +(process.env.READER_RATE || 1);   // requests per second to any one library's own catalog
 const hostSlots = new Map();
 function readerCtx(host) {
@@ -186,7 +224,7 @@ function readerCtx(host) {
         hostSlots.set(host, at + 1000 / READER_RATE); if (at > now) await sleep(at - now);
         stats.requests++;
         try {
-          const r = await fetch(url, { ...init, headers: { "User-Agent": UA, ...(init.headers || {}) }, signal: AbortSignal.timeout(60e3) });
+          const r = await publicFetch(url, { ...init, headers: { "User-Agent": UA, ...(init.headers || {}) }, signal: AbortSignal.timeout(60e3) });
           if (r.ok || (init.redirect === "manual" && r.status >= 300 && r.status < 400)) return r;   // Polaris follows its own redirects for the session cookie
           last = new Error(`HTTP ${r.status} from ${new URL(url).host}`);
           if (r.status !== 429 && r.status < 500) throw Object.assign(last, { permanent: true });
@@ -478,15 +516,15 @@ async function workOn(q) {
     paused = true; return "stop";
   } else if (r.result === "blocked") {
     blocked = true; failed++;
-    status.libraries[slug] = { ...meta, state: "in progress, run blocked by the library gateway", name, error: r.error, blockedAt: new Date().toISOString() };
-    log(`::error::BLOCKED while copying ${slug}: ${r.error}. Progress is saved; stopping this run.`);
+    status.libraries[slug] = { ...meta, state: "in progress, run blocked by the library gateway", name, error: cleanError(r.error), blockedAt: new Date().toISOString() };
+    log(`::error::BLOCKED while copying ${slug}: ${cleanError(r.error)}. Progress is saved; stopping this run.`);
     return "stop";
   } else {
     failed++;
     // a reader retry starts over: a saved plan would keep yesterday's counts and filters after the reader is fixed
     if (isReader(slug)) fs.rmSync(path.join(STATE, slug + ".json"), { force: true });
-    status.libraries[slug] = { state: "failing", name, attempts: (meta.attempts || 0) + 1, lastFailAt: Date.now(), error: r.error };
-    log(`::error::${slug} failed (attempt ${(meta.attempts || 0) + 1}): ${r.error}`);
+    status.libraries[slug] = { state: "failing", name, attempts: (meta.attempts || 0) + 1, lastFailAt: Date.now(), error: cleanError(r.error) };
+    log(`::error::${slug} failed (attempt ${(meta.attempts || 0) + 1}): ${cleanError(r.error)}`);
   }
   return "next";
 }

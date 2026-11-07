@@ -1,4 +1,10 @@
 # nomad-library-data
+The library copier behind [Nomad Library](https://library.nomadovernormal.com). Site code, issues and the contributor guide: [Chrisgpresents/nomad-library](https://github.com/Chrisgpresents/nomad-library).
+
+**Want your library's catalog system supported?** Write a reader: start with [readers/README.md](readers/README.md) (the interface) and a working reader like [readers/vega.mjs](readers/vega.mjs), test it with `node test/e2e.mjs`, and open a pull request here. Find your system's issue under [library-request](https://github.com/Chrisgpresents/nomad-library/labels/library-request). Readers must stay polite: pace requests (1 per second per host), and never get around bot protection a library has put up.
+
+Licensed under the [GNU AGPL v3](LICENSE).
+
 Weekly copies of public library catalogs for https://library.nomadovernormal.com.
 `crawl.mjs` runs daily on GitHub Actions and publishes `snap/<slug>.json` to GitHub Pages (branch gh-pages).
 No keys, no servers, nothing on a Cloudflare Worker.

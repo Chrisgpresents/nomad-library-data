@@ -24,6 +24,19 @@ const PAR = +(process.env.PARALLEL || 4);
 const STALE_MS = +(process.env.STALE_DAYS || 21) * 864e5;            // full BiblioCommons copy (shelf status, removed titles)
 const TOPUP_MS = +(process.env.TOPUP_HOURS || 20) * 36e5, TOPUP_MAX_PAGES = 12;   // daily top-up: newest titles only
 const GATEWAY_PAUSE_MS = 20 * 6e4;           // after a block, later slices skip the gateway this long and keep copying readers
+// ---- the gentle weekly rotation (11.21.26) ----------------------------------------------------------------------
+// Since 11.10 the gateway refuses GitHub's address after ~35 to 65 requests in a row, at any pace. So the copier
+// tiptoes: one short burst of at most GW_BURST gateway requests, then none for GW_GAP_MIN, and at most GW_DAY_MAX a
+// day. Each day it tops up the BiblioCommons copies that are oldest, 1/ROTATION_DAYS of them (more only to catch up
+// on copies older than ROTATION_DAYS), so every library gets its new Blu-rays, DVDs and games, with the shelf status
+// and holds of those newest titles, about once a week. A 403 ends the burst at once (no probing): the next burst waits
+// GW_BLOCK_GAP_MIN and is smaller. Same NomadLibrary user agent, one runner, no address tricks.
+// No full BiblioCommons re-copies while rotating (~1,000 requests each would never fit). GW_BURST=0 = off (tests).
+const GW_BURST = process.env.GW_BURST === undefined ? 30 : +process.env.GW_BURST, ROTATING = GW_BURST > 0;
+const ROTATION_DAYS = +(process.env.ROTATION_DAYS || 7);
+const GW_GAP_MS = +(process.env.GW_GAP_MIN || 60) * 6e4, GW_BLOCK_GAP_MS = +(process.env.GW_BLOCK_GAP_MIN || 180) * 6e4;
+const GW_DAY_MAX = +(process.env.GW_DAY_MAX || 300), GW_MIN_BURST = 10;
+let gwAllow = Infinity, gwUsed = 0;          // this burst: gateway requests allowed and made
 const MAX_ATTEMPTS = 8;                      // after this many failed runs a library is parked as "stuck" and shown in status
 const backoffMs = n => Math.min(6 * 36e5 * n, 48 * 36e5);   // 6 h, 12 h, 18 h ... capped at 48 h between tries of a failing library
 // Scheduled copies come only from visitor requests. --only is an explicit manual override.
@@ -100,7 +113,7 @@ function shape(id, b, f, seen) {
 
 // ---- network with bounded retries --------------------------------------------------------------
 // 11.21.26: from GitHub's addresses the gateway now blocks after ~50 to 65 quick requests and lets us back in within
-// 20 minutes, so it's asked once every ~7 s (45 requests per 5 minutes). Daily top-ups need ~1,000 requests (~2 hours).
+// 20 minutes, so it's asked once every ~7 s. The weekly rotation (GW_BURST above) keeps each burst under that.
 const RATE = +(process.env.RATE || 0.15);    // gateway requests per second. Measured 10.11.26: the gateway allows ~480 requests then blocks an address for ~3 min; a steady 1.1/s ran 1,018 requests with no block
 let nextSlot = 0;
 async function slot() { const now = Date.now(), at = Math.max(nextSlot, now); nextSlot = at + 1000 / RATE; if (at > now) await sleep(at - now); }
@@ -109,7 +122,11 @@ async function getJson(url, { tries = 4, timeout = 25e3, limit = false, headers 
   let delay = RETRY_BASE, last;
   for (let i = 0; i < tries; i++) {
     try {
-      if (limit) { await slot(); stats.requests++; }
+      if (limit) {
+        await slot();
+        if (gwUsed >= gwAllow) { const b = new Error("this burst's gateway requests are used up"); b.budget = true; throw b; }
+        stats.requests++; gwUsed++;
+      }
       const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json", ...headers }, signal: AbortSignal.timeout(timeout) });
       if (r.ok) return await r.json();
       last = new Error(`HTTP ${r.status}`);
@@ -120,7 +137,7 @@ async function getJson(url, { tries = 4, timeout = 25e3, limit = false, headers 
         delay = ra > 0 ? Math.min(ra * 1000, 60e3) : delay;
       } else { last.permanent = true; throw last; }
     } catch (e) {
-      if (e.permanent || e.blocked) throw e;
+      if (e.permanent || e.blocked || e.budget) throw e;
       if (e.name === "TimeoutError" || e.name === "AbortError") stats.timeouts++;
       last = last && last.message.startsWith("HTTP") ? last : e;
     }
@@ -390,6 +407,10 @@ async function crawlLibrary(slug, st) {
         const got = await Promise.allSettled(batch.map(n => getJson(pageUrl(slug, fmt, n), { tries: 4, limit: true })));
         got.forEach((g, k) => { if (g.status === "fulfilled") { take(g.value, f); done.add(batch[k]); stats.pages++; } });
         stats.busyMs += Date.now() - tb;
+        if (got.some(g => g.status === "rejected" && g.reason?.budget)) { saveState(st); return { result: "paused" }; }
+        if (ROTATING && got.some(g => g.status === "rejected" && g.reason?.blocked)) {   // tiptoeing: never probe a block
+          saveState(st); return { result: "blocked", error: `the library gateway answered 403 (blocked) after ${gwUsed} requests this burst` };
+        }
         // The gateway answering 403 to a whole batch (twice running) means this address is blocked. Stop asking,
         // wait with one cheap probe a minute until it lets us back in, then carry on. The pages that failed are
         // retried in the second pass. Records every block so the real sustainable rate is known, not guessed.
@@ -419,8 +440,9 @@ async function topUp(slug) {
   let d; try { d = JSON.parse(zlib.gunzipSync(fs.readFileSync(file))); } catch { return { result: "failed", error: "could not read the current copy" }; }
   const byId = new Map(d.rows.map(r => [r[0], r])), seen = { client: d.sc || "" }, fresh = [];
   let updated = 0;
+  const g0 = gwUsed, maxPages = ROTATING ? Math.max(1, Math.floor(gwBurst() / FMTS.length)) : TOPUP_MAX_PAGES;   // a whole top-up fits one burst
   for (const [fmt, f] of FMTS) {
-    for (let n = 1; n <= TOPUP_MAX_PAGES; n++) {
+    for (let n = 1; n <= maxPages; n++) {
       if (Date.now() > DEADLINE) return { result: "paused" };
       const g = await getJson(pageUrl(slug, fmt, n), { tries: 3, limit: true }); stats.pages++;
       const bibs = g.entities?.bibs || {}; let added = 0;
@@ -434,7 +456,7 @@ async function topUp(slug) {
     }
   }
   if (fresh.length) { await attachRatings(fresh); await attachGenres(fresh, false); }
-  return { result: "topped", d, fresh, updated, sc: seen.client };
+  return { result: "topped", d, fresh, updated, sc: seen.client, cost: gwUsed - g0 };
 }
 // adds: [[when, count], ...] newest first. The first `count` rows were added (and their shelf status read) at `when`,
 // the next batch before that, and every row after the batches has the full copy's status. The site shows it as
@@ -450,15 +472,16 @@ function legacyAdds(d, full) {
 function publishTopUp(slug, r) {
   const now = Date.now(), d = r.d, prev = index[slug] || {};
   const full = prev.full || prev.finished || d.full || d.finished;
-  if (r.fresh.length || r.updated) {
+  // while rotating, a top-up always rewrites the copy so its date (the site's "updated <date>") says when it was read
+  if (r.fresh.length || r.updated || ROTATING) {
     const rows = [...r.fresh, ...d.rows];
     const adds = [...(r.fresh.length ? [[now, r.fresh.length]] : []), ...(Array.isArray(d.adds) ? d.adds : legacyAdds(d, full))].slice(0, 60);
     const extra = d.rec ? `,"rec":${JSON.stringify(d.rec)},"sys":${JSON.stringify(d.sys || "")}${d.na ? ',"na":1' : ""}` : "";
     const raw = `{"ver":${now},"finished":${now},"full":${full},"adds":${JSON.stringify(adds)},"total":${rows.length},"sc":${JSON.stringify(r.sc || d.sc || "")}${extra},"rows":[${rows.map(x => JSON.stringify(x)).join(",")}]}`;
     const gz = zlib.gzipSync(raw, { level: 9 });
     if (!DRY) writeAtomic(path.join(OUT, "snap", slug + ".json.gz"), gz);
-    index[slug] = { ...prev, finished: now, full, topped: now, total: rows.length, bytes: gz.length, rawBytes: raw.length };
-  } else index[slug] = { ...prev, full, topped: now };
+    index[slug] = { ...prev, finished: now, full, topped: now, total: rows.length, bytes: gz.length, rawBytes: raw.length, tc: r.cost };
+  } else index[slug] = { ...prev, full, topped: now, tc: r.cost };
 }
 
 function validate(rows, st, prev) {
@@ -516,6 +539,12 @@ status.gateway = status.gateway || { blocks: [] };
 for (const v of Object.values(status.libraries)) if (v && v.error) v.error = cleanError(v.error);   // older runs published raw page text
 let reqsAtRecovery = 0;
 const now = Date.now();
+const G = status.gateway, today = new Date(now).toISOString().slice(0, 10);
+const gwBurst = () => Math.min(G.burst || GW_BURST, GW_BURST);
+if (ROTATING) {
+  G.rotationStarted = G.rotationStarted || now;
+  if (G.rot?.day !== today) { if (G.rot) G.days = [G.rot, ...(G.days || [])].slice(0, 28); G.rot = { day: today, requests: 0, bursts: 0, refreshed: 0, blocks: 0 }; }
+}
 
 const wanted = await wantedList();
 if (wanted === null && !ONLY) process.exit(4);
@@ -535,8 +564,10 @@ for (const slug of candidates) {
   const stale = isReader(slug) ? +(process.env.READER_STALE_DAYS || 2) * 864e5 : STALE_MS;
   const full = idx?.full || idx?.finished || 0;
   // a BiblioCommons copy gets its new arrivals daily (cheap) and a full re-copy every STALE_DAYS (shelf status, removals)
+  const last = idx ? idx.topped || idx.finished : 0;
   const need = !idx ? "new"
-    : !isReader(slug) && (idx.topped || idx.finished) < now - TOPUP_MS ? "topup"
+    : ROTATING && !isReader(slug) ? (last < now - (ROTATION_DAYS - 1) * 864e5 ? "topup" : null)   // weekly, oldest first
+    : !isReader(slug) && last < now - TOPUP_MS ? "topup"
     : full < now - stale ? "refresh" : null;
   if (!need) continue;
   if (meta.attempts >= MAX_ATTEMPTS && !ONLY) { status.libraries[slug] = { ...meta, state: "stuck" }; continue; }
@@ -550,7 +581,23 @@ const RANK = { topup: 0, new: 1, refresh: 2 };
 queue.sort((a, b) => (isReader(b.slug) - isReader(a.slug)) || (a.need === b.need ? (a.need === "new" ? a.askedAt - b.askedAt : a.finished - b.finished) : RANK[a.need] - RANK[b.need]));
 // right after a block, leave the gateway alone for a while; the reader libraries still get copied this slice
 const gatewayPaused = !ONLY && (status.gateway.pauseUntil || 0) > now;
-if (gatewayPaused) { log(`gateway paused until ${new Date(status.gateway.pauseUntil).toISOString()} after a block: copying reader libraries only`); for (let i = queue.length - 1; i >= 0; i--) if (!isReader(queue[i].slug)) queue.splice(i, 1); }
+const dropGateway = () => { for (let i = queue.length - 1; i >= 0; i--) if (!isReader(queue[i].slug)) queue.splice(i, 1); };
+if (gatewayPaused) { log(`gateway paused until ${new Date(status.gateway.pauseUntil).toISOString()} after a block: copying reader libraries only`); dropGateway(); }
+if (ROTATING) {
+  // today's slice: the oldest 1/ROTATION_DAYS of the BiblioCommons copies, plus any older than ROTATION_DAYS
+  const bcCopies = Object.keys(index).filter(k => !isReader(k));
+  const overdue = bcCopies.filter(k => (index[k].topped || index[k].finished) < now - ROTATION_DAYS * 864e5).length;
+  const slice = Math.max(Math.ceil(bcCopies.length / ROTATION_DAYS) - G.rot.refreshed, overdue, 0);
+  let n = 0;
+  for (let i = 0; i < queue.length; i++) if (queue[i].need === "topup" && ++n > slice) queue.splice(i--, 1);
+  const wait = (G.nextBurstAt || 0) - now, left = GW_DAY_MAX - G.rot.requests;
+  if (queue.some(q => !isReader(q.slug))) {
+    if (wait > 0) { log(`tiptoeing: next gateway burst at ${new Date(G.nextBurstAt).toISOString()}; copying reader libraries only`); dropGateway(); }
+    else if (left <= 0) { log(`tiptoeing: today's ${GW_DAY_MAX} gateway requests are used; copying reader libraries only`); dropGateway(); }
+    else gwAllow = Math.min(gwBurst(), left);
+  }
+  log(`rotation: ${G.rot.refreshed} of ${Math.ceil(bcCopies.length / ROTATION_DAYS)} BiblioCommons copies topped today (${overdue} older than ${ROTATION_DAYS} days), ${G.rot.requests} of ${GW_DAY_MAX} gateway requests used, burst ${gwBurst()}`);
+}
 log(`${candidates.length} candidate libraries, ${queue.length} to work on (${queue.filter(q => q.need === "new").length} new, ${queue.filter(q => q.need === "topup").length} top-up, ${queue.filter(q => q.need === "refresh").length} refresh), ${waiting.length} waiting out a backoff, ${Object.keys(index).length} copied, budget ${(BUDGET_MS / 6e4).toFixed(0)} min, parallel ${PAR}`);
 if (!queue.length) {
   for (const s of waiting) status.libraries[s] = { ...status.libraries[s], state: "waiting after failures" };
@@ -562,10 +609,12 @@ let failed = 0, doneCount = 0, paused = false, blocked = false;
 async function workOn(q) {
   const { slug } = q, name = names.get(slug) || slug, t = Date.now(), p0 = stats.pages;
   if (q.need === "topup") {
+    // a top-up only starts if its last cost still fits this burst (the first one of a burst always fits)
+    if (ROTATING && gwUsed > 0 && gwAllow - gwUsed < Math.min(index[slug]?.tc || 6, gwBurst())) { paused = true; return "stop"; }
     let r;
-    try { r = await topUp(slug); } catch (e) { r = e.blocked ? { result: "blocked" } : { result: "failed", error: e.message }; }
+    try { r = await topUp(slug); } catch (e) { r = e.blocked ? { result: "blocked" } : e.budget ? { result: "paused" } : { result: "failed", error: e.message }; }
     if (r.result === "topped") {
-      publishTopUp(slug, r); doneCount++;
+      publishTopUp(slug, r); doneCount++; if (ROTATING) G.rot.refreshed++;
       if (!DRY) writeAtomic(idxPath, JSON.stringify({ ...index }));
       log(`topped ${slug}: ${r.fresh.length} new, ${r.updated} shelf changes, ${stats.pages - p0} pages`);
       return "next";
@@ -582,7 +631,7 @@ async function workOn(q) {
   try {
     r = isReader(slug) ? await crawlReader(slug, st) : await crawlLibrary(slug, st);
     if (r.result === "done") r = await finishLibrary(slug, st, name, index);
-  } catch (e) { saveState(st); r = e.blocked ? { result: "blocked", error: `the library gateway answered 403 (blocked) after ${stats.requests} requests this run` } : { result: "failed", error: e.message }; }
+  } catch (e) { saveState(st); r = e.blocked ? { result: "blocked", error: `the library gateway answered 403 (blocked) after ${stats.requests} requests this run` } : e.budget ? { result: "paused" } : { result: "failed", error: e.message }; }
   const secs = ((Date.now() - t) / 1e3).toFixed(0);
   if (r.result === "done") {
     doneCount++; fs.rmSync(path.join(STATE, slug + ".json"), { force: true });
@@ -623,10 +672,23 @@ async function readerLine() {
     if ((await workOn(rdQueue.shift())) === "stop") return;
   }
 }
+// a burst is booked before its first request, so a crash can't turn it into two bursts in a row
+const bursting = ROTATING && bcQueue.length > 0;
+if (bursting) { G.nextBurstAt = now + GW_GAP_MS; G.rot.bursts++; if (!DRY) writeAtomic(statusPath, JSON.stringify(status)); }
 await Promise.all([bcLine(), ...Array.from({ length: Math.max(1, +(process.env.READER_POOL || 6)) }, readerLine)]);
+if (bursting) {
+  G.rot.requests += gwUsed;
+  G.lastBurst = { at: new Date(now).toISOString(), requests: gwUsed, allowed: gwAllow, blocked };
+  if (blocked) {
+    G.rot.blocks++; G.nextBurstAt = Date.now() + GW_BLOCK_GAP_MS; G.burst = Math.max(GW_MIN_BURST, Math.min(gwBurst(), gwUsed) - 5);
+    G.blocks.push({ at: new Date().toISOString(), requestsBefore: Math.max(0, gwUsed - 1), inBurst: true, recovered: false });
+    G.blocks = G.blocks.slice(-40);
+    log(`::warning::tiptoeing: the gateway refused us after ${gwUsed} requests in this burst; next burst in ${GW_BLOCK_GAP_MS / 36e5} h, burst now ${G.burst}`);
+  }
+}
 for (const s of waiting) status.libraries[s] = { ...status.libraries[s], state: "waiting after failures" };
 writeStatus(failed);
-log(`summary: ${doneCount} copied, ${failed} failed, ${paused ? "paused at time budget" : "queue finished"}, ${stats.pages} pages in ${((Date.now() - T0) / 6e4).toFixed(1)} min, ${stats.retries} retries, ${stats.http429} x 429, ${stats.http403} x 403, ${stats.http5xx} x 5xx, ${stats.timeouts} timeouts`);
+log(`summary: ${doneCount} copied, ${failed} failed, ${paused ? "paused (time or burst budget)" : "queue finished"}, ${stats.pages} pages in ${((Date.now() - T0) / 6e4).toFixed(1)} min, ${stats.retries} retries, ${stats.http429} x 429, ${stats.http403} x 403, ${stats.http5xx} x 5xx, ${stats.timeouts} timeouts`);
 // 5 = the gateway blocked us (stop this run), 6 = some libraries failed (normal: each waits out a backoff and is
 // retried), 4 = the want list could not be read. Only 4 and crashes mean the copier itself is broken.
 // a block no longer ends the run: the next slice skips the gateway for GATEWAY_PAUSE_MS and keeps copying readers

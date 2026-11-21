@@ -28,7 +28,7 @@ async function scenario(name, cfg, fn) {
     run(args = [], env = {}) {
       const r = spawnSync("node", [path.join(ROOT, "crawl.mjs"), "--out", ctx.out, "--state", ctx.state, ...args], {
         encoding: "utf8", timeout: 120e3,
-        env: { ...process.env, SITE_BASE: `http://127.0.0.1:${p}`, GATEWAY_BASE: `http://127.0.0.1:${p}/v2/libraries`, RETRY_BASE_MS: "30", PASS_WAIT_MS: "100", RATE: "400", PARALLEL: "4", ...env },
+        env: { ...process.env, SITE_BASE: `http://127.0.0.1:${p}`, GATEWAY_BASE: `http://127.0.0.1:${p}/v2/libraries`, RETRY_BASE_MS: "30", PASS_WAIT_MS: "100", RATE: "400", PARALLEL: "4", GW_BURST: "0", ...env },
       });
       return { code: r.status, log: (r.stdout || "") + (r.stderr || "") };
     },
@@ -182,6 +182,50 @@ await scenario("daily top-up: adds new arrivals with a few requests, keeps the r
     `the copy says which rows the top-up added and when (adds ${JSON.stringify(s.adds)})`);
   const r2 = c.run();
   ok(r2.code === 3, `topped today: nothing to do (exit ${r2.code})`);
+});
+// ---- the gentle weekly rotation ----
+const ten = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`r${i}`, { BLURAY: 2, DVD: 2 }]));
+const tenWanted = Object.keys(ten).map((k, i) => [k, k, i + 1]);
+const age = (c, days) => { const idx = c.index(); Object.keys(idx).forEach((k, i) => { idx[k].finished -= (days + i * 0.01) * 864e5; delete idx[k].topped; }); fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx)); return idx; };
+await scenario("rotation: a daily slice of the oldest copies, one burst, then quiet until the gap", { libs: ten, wanted: tenWanted }, async c => {
+  ok(c.run().code === 0 && Object.keys(c.index()).length === 10, "10 libraries copied (rotation off)");
+  const idx = age(c, 6.5);                         // due (older than 6 days), not overdue: the slice is 10 / 7 = 2
+  const h0 = (await c.hits()).pages;
+  const r = c.run([], { GW_BURST: "30" });
+  const topped = Object.keys(c.index()).filter(k => c.index()[k].topped);
+  ok(r.code === 0 && topped.length === 2, `2 of 10 topped today (${topped.join(",")}, exit ${r.code})`);
+  ok(topped.sort().join() === "r8,r9", "the oldest two went first");
+  ok((await c.hits()).pages - h0 <= 6, `${(await c.hits()).pages - h0} gateway requests`);
+  const s = c.snap("r9");
+  ok(s.finished > idx.r9.finished + 6 * 864e5 && s.full === idx.r9.finished, "a top-up with nothing new still dates the copy (the site's 'updated'), full copy time kept");
+  const st = c.status().gateway;
+  ok(st.rot.refreshed === 2 && st.rot.bursts === 1 && st.nextBurstAt > Date.now() + 50 * 6e4, `burst booked, next one in an hour (${JSON.stringify(st.rot)})`);
+  const h1 = (await c.hits()).pages, r2 = c.run([], { GW_BURST: "30" });
+  ok(r2.code === 3 && (await c.hits()).pages === h1, `inside the gap: the gateway is not touched (exit ${r2.code})`);
+  const s2 = c.status(); s2.gateway.nextBurstAt = 0; fs.writeFileSync(path.join(c.out, "snap/status.json"), JSON.stringify(s2));
+  const r3 = c.run([], { GW_BURST: "30" });
+  ok(r3.code === 3 && (await c.hits()).pages === h1, `today's slice is done: still nothing asked (exit ${r3.code})`);
+});
+await scenario("rotation: catch-up stays inside the burst", { libs: ten, wanted: tenWanted }, async c => {
+  ok(c.run().code === 0, "copied");
+  age(c, 20);                                      // all overdue: the slice is all 10, the burst still caps it
+  const h0 = (await c.hits()).pages, r = c.run([], { GW_BURST: "9" });
+  const used = (await c.hits()).pages - h0, topped = Object.keys(c.index()).filter(k => c.index()[k].topped).length;
+  ok(r.code === 0 && used <= 9, `no more than 9 gateway requests in the burst (${used})`);
+  ok(topped === 2, `2 top-ups fit; the next one (est. 6 requests, none measured yet) waits for the next burst (${topped})`);
+});
+await scenario("rotation: a 403 ends the burst at once, no probing, a longer gap and a smaller burst", { libs: ten, wanted: tenWanted }, async c => {
+  ok(c.run().code === 0, "copied");
+  age(c, 20);
+  const h0 = await c.hits();
+  c.setCfg({ libs: ten, wanted: tenWanted, blockAfter: h0.pages + 4 });
+  const r = c.run([], { GW_BURST: "30", COOL_PROBE_MS: "100", PARALLEL: "1" });
+  const h = await c.hits(), g = c.status().gateway;
+  ok((h.blocked || 0) === 1, `exactly one refused request (${h.blocked})`);
+  ok(g.nextBurstAt > Date.now() + 2.5 * 36e5 && g.rot.blocks === 1, "next burst waits 3 hours");
+  ok(g.burst === 10, `burst shrank to the floor of 10 (${g.burst})`);
+  ok(g.blocks.some(b => b.inBurst), "the block is recorded");
+  ok(r.code === 0 || r.code === 6, `run ends normally (exit ${r.code})`);
 });
 if (fail) process.exitCode = 1;
 

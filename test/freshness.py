@@ -1,7 +1,7 @@
 # Fails (so GitHub emails the owner) when too many BiblioCommons copies are stale, which is what a gateway block looks like.
 import json, os, sys, time, urllib.request
 URL = os.environ.get("COPIES_URL", "https://nomad-library-copies.pages.dev") + "/snap/index.json"
-MAX_DAYS = float(os.environ.get("MAX_DAYS", "3"))      # a healthy copy is topped up daily
+MAX_DAYS = float(os.environ.get("MAX_DAYS", "8"))      # the weekly rotation tops up each copy every ~7 days
 MAX_SHARE = float(os.environ.get("MAX_SHARE", "0.10"))  # more stale than this = blocked or broken
 src = sys.argv[1] if len(sys.argv) > 1 else None
 raw = open(src, encoding="utf-8").read() if src else urllib.request.urlopen(urllib.request.Request(URL, headers={"User-Agent": "NomadLibrary/1.0 (+https://library.nomadovernormal.com)"}), timeout=60).read().decode("utf-8")

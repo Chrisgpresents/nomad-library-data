@@ -69,7 +69,8 @@ const searchUrl = (lib, p, rw, ps) =>
 const FACET_OK = /TYPE|FORMAT|ITEMCAT|MEDIA|COLLECTION|MATERIAL/i;
 const FACET_NO = /^(ERC_FORMAT|EREADER)$|SERIES|SUBJECT|AUTHOR|GENRE|LANGUAGE|LIBRARY|LOCATION|PUBDATE/i;
 const RE_BLU = /blu.?ray|\buhd\b|\b4k\b|ultra hd/i;
-const RE_GAME = /video ?games?|^games?$|playstation|xbox|nintendo|\bwii\b|\bswitch\b|\bps[2-5]\b|\b3ds\b|\bds\b|pc games?|gaming/i;
+// "Electronic Game" (Pinellas ITYPE), "Electronic game" and "EGame SW" (Detroit ITEMCAT1) are console games too
+const RE_GAME = /video ?games?|^games?$|playstation|xbox|nintendo|\bwii\b|\bswitch\b|\bps[2-5]\b|\b3ds\b|\bds\b|pc games?|gaming|electronic games?\b|\be-?games?\b/i;
 const RE_GAME_NO = /board|toys?|fun & games|playaway|self-playing|wonderbook|launchpad|equipment|console|e-?video|children'?s? category/i;
 const RE_GAMEROW = /playstation|xbox|nintendo|\bwii\b|\bps[2-5]\b|\b3ds\b|computer (?:chip )?cartridge/i;
 const RE_DVD = /\bdvd/i;
@@ -77,8 +78,8 @@ const RE_DVD_NO = /blu|player|ppr|public performance|^1:/i;
 
 function platOf(label) {
   const s = label.toLowerCase();
-  if (/switch ?2/.test(s)) return "Switch 2";
-  if (/switch/.test(s)) return "Switch";
+  if (/switch ?2|\bsw ?2\b/.test(s)) return "Switch 2";
+  if (/switch|\begame[- ]sw\b/.test(s)) return "Switch";
   if (/wii ?u/.test(s)) return "Wii U";
   if (/wii/.test(s)) return "Wii";
   if (/3ds/.test(s)) return "3DS";
@@ -127,7 +128,10 @@ export async function plan(lib, ctx) {
     }
   }
   if (!facets.length) throw new Error("no facets found on " + lib.base);
-  const gamesF = pick(facets, (f) => RE_GAME.test(f.label) && !RE_GAME_NO.test(f.label));
+  // no game format (Westminster files games as "Electronic Resource" with its databases): the form/genre term
+  // "Video games." is given to the games themselves (books about games get it as a subject, not a genre)
+  let gamesF = pick(facets, (f) => RE_GAME.test(f.label) && !RE_GAME_NO.test(f.label));
+  if (!gamesF) { const g = facets.filter((f) => /GENRE/i.test(f.name) && /^video games\.?$/i.test(f.label) && f.count > 0); if (g.length) gamesF = g; }
   // ITEMCAT* facets are per-copy tags that libraries use loosely (junk like books tagged "Blu-ray"), so try them last.
   const noCat = (f) => !/^ITEMCAT/i.test(f.name);
   let dvdF = pick(facets, (f) => noCat(f) && RE_DVD.test(f.label) && !RE_DVD_NO.test(f.label));
@@ -137,6 +141,8 @@ export async function plan(lib, ctx) {
     mixed = true;
   }
   if (!dvdF) dvdF = pick(facets, (f) => RE_DVD.test(f.label) && !RE_DVD_NO.test(f.label));
+  // no format facet at all (Detroit): the item category for films, "Feature videorecording" / "Nonfeature videorecording"
+  if (!dvdF) { dvdF = pick(facets, (f) => /^ITEMCAT/i.test(f.name) && /^(?:(?:non-? ?)?feature )?video ?recordings?$/i.test(f.label)); if (dvdF) mixed = true; }
   // one facet set for both ("DVD / Blu-ray / Video Rated R"): read it as the DVD set, Blu-rays split out by title text
   if (!dvdF) { dvdF = pick(facets, (f) => RE_DVD.test(f.label) && RE_BLU.test(f.label) && !/player|ppr|public performance/i.test(f.label)); if (dvdF) mixed = true; }
   let bluF = pick(facets, (f) => noCat(f) && RE_BLU.test(f.label));
@@ -175,8 +181,9 @@ export async function plan(lib, ctx) {
 function cleanTitle(t) {
   t = strip(t);
   t = t.replace(/\s*\[[^\]]*(?:videorecording|video ?recording|video ?disc|blu-?ray|dvd|4k|uhd|electronic resource|sound recording|game|playstation|xbox|nintendo|switch|wii|ps[2-5]|3ds|pc)[^\]]*\]/gi, "");
+  t = t.replace(/\s*\/\s.*$/, "").replace(/[\s.]+$/, "");   // "Juror #2 (DVD) [videorecording]." (Detroit) ends on "(DVD)" now
   t = t.replace(/\s*\((?:blu-?ray|dvd|4k|uhd|ultra hd|widescreen|full screen)[^)]*\)\s*$/i, "");
-  t = t.replace(/\s*\/\s.*$/, "").replace(/\s*[\/:;,.\s]+$/, "").trim();
+  t = t.replace(/\s*[\/:;,.\s]+$/, "").trim();
   return t;
 }
 function splitTitle(t) {

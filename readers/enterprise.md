@@ -27,6 +27,12 @@ are dropped from the DVD set: `mixed: true`). Games = labels like Video Games/Ga
 from the facet label or the title "[PlayStation 5]". Several facet values per format (OCPL, Pratt, LAFLA, Boone) are
 separate "parts": separate `qf` values AND together (not OR), so `pages` is the sum over parts and page(n) maps into a part.
 Task objects carry `parts`/`mixed`; page() rebuilds them with plan() if missing.
+- No format facet at all (Detroit): DVD = the ITEMCAT values "Feature videorecording" / "Nonfeature videorecording"
+  (mixed, Blu-rays by `qu=blu-ray`). Game labels include "Electronic Game" (Pinellas ITYPE), "Electronic game", "EGame SW",
+  "1:EGAME-PS5" (Detroit ITEMCAT1); "EGame SW" = Switch, "SW2" = Switch 2.
+- No game format at all: the form/genre value "Video games." (Westminster files games as FORMAT "Electronic Resource" next
+  to its databases; the genre term marks the games themselves). Fairbanks (anch fnsb) has neither: its games are FORMAT
+  "Electronic resource" (104 of 174 hits for "nintendo switch"), a value holding 299,484 mostly online records, so no games.
 
 ## Row data
 title, sub (split at ": " or ". "), disc year (Publication Date), cover ("View cover art" link, else Syndetics image URL,

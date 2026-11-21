@@ -45,13 +45,13 @@ async function hop(ctx, url, jar, extra = {}) {
   }
   return null;
 }
-function searchUrl(lib, limit, sort) {
-  return lib.base + "/search/searchresults.aspx?" + ctxQ(lib) + "type=Advanced&term=*&by=KW&sort=" + sort + "&page=0&limit=" + encodeURIComponent(limit).replace(/%3D/g, "=");
+function searchUrl(lib, limit, sort, term = "*") {
+  return lib.base + "/search/searchresults.aspx?" + ctxQ(lib) + "type=Advanced&term=" + encodeURIComponent(term) + "&by=KW&sort=" + sort + "&page=0&limit=" + encodeURIComponent(limit).replace(/%3D/g, "=");
 }
-async function openSearch(lib, limit, ctx, sort) {
+async function openSearch(lib, limit, ctx, sort, term) {
   const jar = {};
   // hop 1 gives the cookie + redirect to process.search; hop 2 runs the search (we do not need its html page)
-  let url = searchUrl(lib, limit, sort);
+  let url = searchUrl(lib, limit, sort, term);
   for (let i = 0; i < 4; i++) {
     const res = await ctx.fetch(url, { redirect: "manual", headers: { cookie: cookieHeader(jar), accept: "text/html" } });
     cookiesFrom(res, jar);
@@ -67,10 +67,10 @@ async function openSearch(lib, limit, ctx, sort) {
   return jar;
 }
 const r_isCap = (t) => t >= 10000 && t % 10000 === 0; // a list cut at the retrieval limit reports exactly 10000 (or 100000)
-async function results(lib, limit, n, ctx, fresh, sort = "PD") {
-  const key = lib.id + "|" + limit + "|" + sort;
+async function results(lib, limit, n, ctx, fresh, sort = "PD", term = "*") {
+  const key = lib.id + "|" + limit + "|" + sort + "|" + term;
   let jar = !fresh && sessions.get(key);
-  if (!jar) { jar = await openSearch(lib, limit, ctx, sort); sessions.set(key, jar); }
+  if (!jar) { jar = await openSearch(lib, limit, ctx, sort, term); sessions.set(key, jar); }
   const res = await ctx.fetch(lib.base + "/search/components/ajaxResults.aspx?page=" + n + "&hpp=" + PAGE,
     { headers: { cookie: cookieHeader(jar), accept: "text/html", "x-requested-with": "XMLHttpRequest" } });
   if (res.status >= 400) throw new Error("HTTP " + res.status + " ajaxResults");
@@ -78,13 +78,16 @@ async function results(lib, limit, n, ctx, fresh, sort = "PD") {
   const m = html.match(/result-count">\s*(?:\d[\d,]*)\s*-\s*(?:\d[\d,]*)\s*of\s*([\d,]+)/i);
   if (!m) {
     if (!/title\.aspx\?[^"]*\bcn=\d+/i.test(html) && html.length < 20000 && fresh) return { html, total: 0 }; // zero hits answers a bare fragment
-    if (!fresh) return results(lib, limit, n, ctx, true, sort); // session expired
+    if (!fresh) return results(lib, limit, n, ctx, true, sort, term); // session expired
     throw new Error("no result list in answer (" + html.length + " bytes): " + html.replace(/\s+/g, " ").slice(0, 400));
   }
   return { html, total: +m[1].replace(/,/g, ""), partial: r_isCap(+m[1].replace(/,/g, "")) };
 }
 
 // ---- formats
+// "DVD", "DVDs", "DVD discs", and the same with a scope tail: "DVD - All Libraries" (Onondaga), "DVD (all branches)".
+// Not "Book + DVD", "Blu-ray and DVD", "Audiobook on DVD".
+const isDvdLabel = (label) => /^dvds?( discs?)?(\s*(-|–|\(|:)\s*(all|every|any)\b.*)?$/i.test(label);
 const LIMIT_CACHE = new Map();
 async function limits(lib, ctx) {
   if (LIMIT_CACHE.has(lib.id)) return LIMIT_CACHE.get(lib.id);
@@ -97,7 +100,7 @@ async function limits(lib, ctx) {
     const val = dec(m[1]), label = m[2].replace(/^[-\s]+/, "").replace(/\s+/g, " ").trim();
     if (/TOM=\*/.test(val)) continue;
     const vs = [/^TOM=[a-z0-9]{2,4}$/i.test(val) ? "TOM=" + val.slice(4).toLowerCase() : val];   // "(TOM=dvd OR TOM=vid) AND ...": split in partsOf if ignored
-    const into = /blu/i.test(label) && !/\band\b.*dvd|dvd.*\band\b/i.test(label) ? out.b : /^dvds?( discs?)?$/i.test(label) ? out.d : /video ?games?/i.test(label) ? out.g : null;
+    const into = /blu/i.test(label) && !/\band\b.*dvd|dvd.*\band\b/i.test(label) ? out.b : isDvdLabel(label) ? out.d : /video ?games?/i.test(label) ? out.g : null;
     if (into) into.push(...vs);
   }
   const lim = {};
@@ -106,6 +109,11 @@ async function limits(lib, ctx) {
   return lim;
 }
 
+// Polaris's own codes for the three formats. A PAC whose "Limit by" menu does not list one may still answer it
+// (Arlington lists no Blu-ray option but honours TOM=brd), or ignore it (Salt Lake County): plan() tries it once.
+const STD = { b: "TOM=brd", d: "TOM=dvd", g: "TOM=vgm" };
+const KEEP = { b: /blu-?ray/i };   // format icon text that marks a row as this format in a keyword search
+const ICON = /c-title-detail-formats__img[^>]*\balt="([^"]*)"/i;
 const PARTS = new Map();
 async function partsOf(lib, f, ctx) {
   const key = lib.id + "|" + f;
@@ -119,6 +127,8 @@ async function partsOf(lib, f, ctx) {
   const all = PARTS.get(allKey);
   const ignored = (r) => !!all && ids(r.html) === all;   // same first records as "all formats" = the filter did nothing
   const queue = [...(lim[f] || [])];
+  const listed = Object.values(lim).flat().some((v) => v.toLowerCase().replace(/\bnot\b.*$/, "").includes(STD[f].toLowerCase()));   // "(TOM=dvd) not (TOM=brd)" lists dvd only
+  if (!listed) queue.push(STD[f]);
   while (queue.length) {
     const l = queue.shift();
     const r = await results(lib, l, 1, ctx, true);
@@ -129,10 +139,20 @@ async function partsOf(lib, f, ctx) {
       else ctx.log(`  polaris ${lib.host}: filter ${l.slice(0, 40)} answers the whole catalog, skipped`);
       continue;
     }
+    if (r.total === 1000) ctx.log(`  polaris ${lib.host}: ${l.slice(0, 40)} stops at 1000 hits, the PAC's result limit: only part of that format is copied`);
     parts.push({ lim: l, sort: "PD", pages: Math.ceil(r.total / PAGE), count: r.total });
     // The PAC stops a result list at its retrieval limit (10000 at some libraries, flagged "--partial"). Re-run the
     // same search under other sort orders: each shows a different first 10000, so the union reaches further.
     if (r.partial) for (const sort of ["TI", "CALL", "AU_PD"]) parts.push({ lim: l, sort, pages: Math.ceil(r.total / PAGE), count: 0 });   // same titles in another order: not more catalog
+  }
+  // No filter for the format at all (Salt Lake County: Blu-rays have their own format icon but no TOM code the PAC
+  // honours, and TOM=dvd leaves them out). Search the word instead and keep only rows whose format icon says so.
+  if (!parts.length && KEEP[f]) {
+    const term = { b: "blu-ray" }[f];
+    const r = await results(lib, "TOM=*", 1, ctx, true, "PD", term);
+    const icons = r.html.split(/<div class="search__position">/).slice(1).map((x) => (x.match(ICON) || [])[1] || "");
+    const share = icons.length ? icons.filter((a) => KEEP[f].test(a)).length / icons.length : 0;
+    if (r.total && share > 0) parts.push({ lim: "TOM=*", term, keep: f, sort: "PD", pages: Math.ceil(r.total / PAGE), count: Math.round(r.total * share) });
   }
   PARTS.set(key, parts);
   return parts;
@@ -165,12 +185,13 @@ export async function page(lib, task, n, ctx) {
   let local = n, part = null;
   for (const p of parts) { if (local <= p.pages) { part = p; break; } local -= p.pages; }
   if (!part) return [];
-  const { html } = await results(lib, part.lim, local, ctx, false, part.sort || "PD");
+  const { html } = await results(lib, part.lim, local, ctx, false, part.sort || "PD", part.term || "*");
   const blocks = html.split(/<div class="search__position">/).slice(1);
   const rows = [];
   for (const b of blocks) {
     const cn = b.match(/title\.aspx\?[^"]*?\bcn=(\d+)/i);
     if (!cn) continue;
+    if (part.keep && !KEEP[part.keep].test((b.match(ICON) || [])[1] || "")) continue;   // keyword hit of another format
     const link = b.match(/<a class="nsm-brief-action-link"[^>]*>([\s\S]*?)<\/a>/i);
     const rawTitle = link ? text(link[1]) : "";
     if (!rawTitle) continue;

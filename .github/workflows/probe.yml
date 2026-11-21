@@ -16,7 +16,9 @@ jobs:
           const [slug, fmt] = process.argv.slice(2);
           const u = `https://gateway.bibliocommons.com/v2/libraries/${slug}/bibs/search?query=*&searchType=bl${fmt ? "&f_FORMAT=" + fmt : ""}&limit=25&page=1&sort=newly_acquired`;
           const r = await fetch(u, { headers: { "User-Agent": "NomadLibrary/1.0 (+https://library.nomadovernormal.com)", Accept: "application/json" } });
-          console.log(r.status, u);
+          console.log(r.status, u, "cors:", r.headers.get("access-control-allow-origin"));
+          const a = await fetch(`https://gateway.bibliocommons.com/v2/libraries/${slug}/bibs/S232C926086/availability`, { headers: { Origin: "https://library.nomadovernormal.com", "User-Agent": "Mozilla/5.0" } });
+          console.log("availability from a browser origin:", a.status, "cors:", a.headers.get("access-control-allow-origin"));
           if (!r.ok) process.exit(0);
           const g = await r.json(), bibs = g.entities?.bibs || {};
           console.log("pagination", JSON.stringify(g.catalogSearch?.pagination));

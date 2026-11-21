@@ -1,0 +1,26 @@
+name: Probe (one gateway search, prints a summary)
+on:
+  workflow_dispatch:
+    inputs:
+      slug: { description: "library slug", default: "bclsnj" }
+      format: { description: "f_FORMAT value, blank for all formats", default: "BLURAY" }
+jobs:
+  p:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: |
+          cat > p.mjs <<'JS'
+          const [slug, fmt] = process.argv.slice(2);
+          const u = `https://gateway.bibliocommons.com/v2/libraries/${slug}/bibs/search?query=*&searchType=bl${fmt ? "&f_FORMAT=" + fmt : ""}&limit=25&page=1&sort=newly_acquired`;
+          const r = await fetch(u, { headers: { "User-Agent": "NomadLibrary/1.0 (+https://library.nomadovernormal.com)", Accept: "application/json" } });
+          console.log(r.status, u);
+          if (!r.ok) process.exit(0);
+          const g = await r.json(), bibs = g.entities?.bibs || {};
+          console.log("pagination", JSON.stringify(g.catalogSearch?.pagination));
+          for (const f of g.catalogSearch?.fields || []) if (/format/i.test(f.id || f.fieldId || "")) console.log("facet", JSON.stringify(f).slice(0, 3000));
+          for (const res of g.catalogSearch?.results || []) { const b = bibs[res.representative]?.briefInfo || {}; console.log(res.representative, b.format, b.publicationDate, b.title); }
+          JS
+          node p.mjs "${{ inputs.slug }}" "${{ inputs.format }}"

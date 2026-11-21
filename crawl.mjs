@@ -436,13 +436,25 @@ async function topUp(slug) {
   if (fresh.length) { await attachRatings(fresh); await attachGenres(fresh, false); }
   return { result: "topped", d, fresh, updated, sc: seen.client };
 }
+// adds: [[when, count], ...] newest first. The first `count` rows were added (and their shelf status read) at `when`,
+// the next batch before that, and every row after the batches has the full copy's status. The site shows it as
+// "as of <date>" when it can't ask the library live. Copies topped before adds existed (11.21.26) get their one
+// earlier batch back from the row order: a copy lists Blu-ray, DVD, games in that order, so the first row where the
+// order goes backwards is where the full copy starts (0 = can't tell; those rows then claim the older date).
+const FMT_RANK = { b: 0, d: 1, g: 2 };
+function legacyAdds(d, full) {
+  if (!(d.finished > full)) return [];
+  for (let i = 1; i < d.rows.length; i++) if (FMT_RANK[d.rows[i][3]] < FMT_RANK[d.rows[i - 1][3]]) return [[d.finished, i]];
+  return [];
+}
 function publishTopUp(slug, r) {
   const now = Date.now(), d = r.d, prev = index[slug] || {};
   const full = prev.full || prev.finished || d.full || d.finished;
   if (r.fresh.length || r.updated) {
     const rows = [...r.fresh, ...d.rows];
+    const adds = [...(r.fresh.length ? [[now, r.fresh.length]] : []), ...(Array.isArray(d.adds) ? d.adds : legacyAdds(d, full))].slice(0, 60);
     const extra = d.rec ? `,"rec":${JSON.stringify(d.rec)},"sys":${JSON.stringify(d.sys || "")}${d.na ? ',"na":1' : ""}` : "";
-    const raw = `{"ver":${now},"finished":${now},"full":${full},"total":${rows.length},"sc":${JSON.stringify(r.sc || d.sc || "")}${extra},"rows":[${rows.map(x => JSON.stringify(x)).join(",")}]}`;
+    const raw = `{"ver":${now},"finished":${now},"full":${full},"adds":${JSON.stringify(adds)},"total":${rows.length},"sc":${JSON.stringify(r.sc || d.sc || "")}${extra},"rows":[${rows.map(x => JSON.stringify(x)).join(",")}]}`;
     const gz = zlib.gzipSync(raw, { level: 9 });
     if (!DRY) writeAtomic(path.join(OUT, "snap", slug + ".json.gz"), gz);
     index[slug] = { ...prev, finished: now, full, topped: now, total: rows.length, bytes: gz.length, rawBytes: raw.length };

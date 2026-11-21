@@ -178,6 +178,8 @@ await scenario("daily top-up: adds new arrivals with a few requests, keeps the r
   ok(s.rows.length === before + 30 && s.rows[0][0].includes("new"), `copy grew by 30, newest first (${before} -> ${s.rows.length})`);
   ok(used <= 6, `only ${used} gateway requests (a full copy is 8+)`);
   ok(c.index().tl.full < c.index().tl.finished && c.index().tl.topped, "index keeps the full-copy time apart from the top-up");
+  ok(Array.isArray(s.adds) && s.adds.length === 1 && s.adds[0][1] === 30 && s.adds[0][0] === s.finished && s.full < s.finished,
+    `the copy says which rows the top-up added and when (adds ${JSON.stringify(s.adds)})`);
   const r2 = c.run();
   ok(r2.code === 3, `topped today: nothing to do (exit ${r2.code})`);
 });

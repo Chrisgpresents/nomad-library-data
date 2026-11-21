@@ -16,10 +16,14 @@ import net from "node:net";
 
 const SITE = process.env.SITE_BASE || "https://library.nomadovernormal.com";
 const GW = process.env.GATEWAY_BASE || "https://gateway.bibliocommons.com/v2/libraries";
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+// Say who we are. Since about 11.3.26 the gateway answers 403 to a Chrome user agent that lacks the rest of a real
+// browser's headers (runs were blocked after ~40 requests); an honest program name passed 60 of 60 at ~1/s (11.21.26).
+const UA = "NomadLibrary/1.0 (+https://library.nomadovernormal.com)";
 const FMTS = [["BLURAY", "b"], ["DVD", "d"], ["VIDEO_GAME", "g"]];
 const PAR = +(process.env.PARALLEL || 4);
-const STALE_MS = +(process.env.STALE_DAYS || 14) * 864e5;
+const STALE_MS = +(process.env.STALE_DAYS || 21) * 864e5;            // full BiblioCommons copy (shelf status, removed titles)
+const TOPUP_MS = +(process.env.TOPUP_HOURS || 20) * 36e5, TOPUP_MAX_PAGES = 12;   // daily top-up: newest titles only
+const GATEWAY_PAUSE_MS = 20 * 6e4;           // after a block, later slices skip the gateway this long and keep copying readers
 const MAX_ATTEMPTS = 8;                      // after this many failed runs a library is parked as "stuck" and shown in status
 const backoffMs = n => Math.min(6 * 36e5 * n, 48 * 36e5);   // 6 h, 12 h, 18 h ... capped at 48 h between tries of a failing library
 // Scheduled copies come only from visitor requests. --only is an explicit manual override.
@@ -404,6 +408,45 @@ async function crawlLibrary(slug, st) {
   return { result: "done" };
 }
 
+// ---- daily top-up of a BiblioCommons copy -------------------------------------------------------
+// The gateway lists each format newest-acquired first, so new discs are on the first pages. Read until a page brings
+// nothing new, add those titles to the published copy, and refresh the shelf status of the titles seen on the way.
+// A few requests per library instead of a full copy's ~1,000, so every library gets its new arrivals every day.
+async function topUp(slug) {
+  const file = path.join(OUT, "snap", slug + ".json.gz");
+  let d; try { d = JSON.parse(zlib.gunzipSync(fs.readFileSync(file))); } catch { return { result: "failed", error: "could not read the current copy" }; }
+  const byId = new Map(d.rows.map(r => [r[0], r])), seen = { client: d.sc || "" }, fresh = [];
+  let updated = 0;
+  for (const [fmt, f] of FMTS) {
+    for (let n = 1; n <= TOPUP_MAX_PAGES; n++) {
+      if (Date.now() > DEADLINE) return { result: "paused" };
+      const g = await getJson(pageUrl(slug, fmt, n), { tries: 3, limit: true }); stats.pages++;
+      const bibs = g.entities?.bibs || {}; let added = 0;
+      for (const res of g.catalogSearch?.results || []) {
+        const id = res.representative; if (!bibs[id]) continue;
+        const row = shape(id, bibs[id], f, seen), old = byId.get(id);
+        if (old) { if (old[6] !== row[6] || old[7] !== row[7]) { old[6] = row[6]; old[7] = row[7]; updated++; } }
+        else { byId.set(id, row); fresh.push(row); added++; }
+      }
+      if (!added || n >= (g.catalogSearch?.pagination?.pages || 1)) break;
+    }
+  }
+  if (fresh.length) { await attachRatings(fresh); await attachGenres(fresh, false); }
+  return { result: "topped", d, fresh, updated, sc: seen.client };
+}
+function publishTopUp(slug, r) {
+  const now = Date.now(), d = r.d, prev = index[slug] || {};
+  const full = prev.full || prev.finished || d.full || d.finished;
+  if (r.fresh.length || r.updated) {
+    const rows = [...r.fresh, ...d.rows];
+    const extra = d.rec ? `,"rec":${JSON.stringify(d.rec)},"sys":${JSON.stringify(d.sys || "")}${d.na ? ',"na":1' : ""}` : "";
+    const raw = `{"ver":${now},"finished":${now},"full":${full},"total":${rows.length},"sc":${JSON.stringify(r.sc || d.sc || "")}${extra},"rows":[${rows.map(x => JSON.stringify(x)).join(",")}]}`;
+    const gz = zlib.gzipSync(raw, { level: 9 });
+    if (!DRY) writeAtomic(path.join(OUT, "snap", slug + ".json.gz"), gz);
+    index[slug] = { ...prev, finished: now, full, topped: now, total: rows.length, bytes: gz.length, rawBytes: raw.length };
+  } else index[slug] = { ...prev, full, topped: now };
+}
+
 function validate(rows, st, prev) {
   const problems = [];
   const expected = Object.values(st.fmts).reduce((n, v) => n + v.count, 0);
@@ -476,16 +519,25 @@ for (const slug of candidates) {
   const idx = index[slug];
   // reader copies are cheap (a few dozen requests) and carry the shelf status the movie page shows, so they refresh every 2 days
   const stale = isReader(slug) ? +(process.env.READER_STALE_DAYS || 2) * 864e5 : STALE_MS;
-  const need = !idx ? "new" : (idx.finished < now - stale ? "refresh" : null);
+  const full = idx?.full || idx?.finished || 0;
+  // a BiblioCommons copy gets its new arrivals daily (cheap) and a full re-copy every STALE_DAYS (shelf status, removals)
+  const need = !idx ? "new"
+    : !isReader(slug) && (idx.topped || idx.finished) < now - TOPUP_MS ? "topup"
+    : full < now - stale ? "refresh" : null;
   if (!need) continue;
   if (meta.attempts >= MAX_ATTEMPTS && !ONLY) { status.libraries[slug] = { ...meta, state: "stuck" }; continue; }
   if (meta.lastFailAt && now < meta.lastFailAt + backoffMs(meta.attempts || 1) && !ONLY) { waiting.push(slug); continue; }
-  queue.push({ slug, need, askedAt: asked.get(slug) ?? 0, finished: idx?.finished || 0, resume: !!st0 });
+  queue.push({ slug, need, askedAt: asked.get(slug) ?? 0, finished: need === "topup" ? (idx.topped || idx.finished) : full, resume: !!st0 });
 }
 // new requests first (oldest request first, so nobody starves), then refreshes oldest copy first
 // readers first: their copies take a minute or two and use the library's own catalog, not the BiblioCommons gateway
-queue.sort((a, b) => (isReader(b.slug) - isReader(a.slug)) || (a.need === b.need ? (a.need === "new" ? a.askedAt - b.askedAt : a.finished - b.finished) : a.need === "new" ? -1 : 1));
-log(`${candidates.length} candidate libraries, ${queue.length} to work on (${queue.filter(q => q.need === "new").length} new, ${queue.filter(q => q.need === "refresh").length} refresh), ${waiting.length} waiting out a backoff, ${Object.keys(index).length} copied, budget ${(BUDGET_MS / 6e4).toFixed(0)} min, parallel ${PAR}`);
+// on the gateway line: top-ups first (a few requests each), then new libraries, then full refreshes
+const RANK = { topup: 0, new: 1, refresh: 2 };
+queue.sort((a, b) => (isReader(b.slug) - isReader(a.slug)) || (a.need === b.need ? (a.need === "new" ? a.askedAt - b.askedAt : a.finished - b.finished) : RANK[a.need] - RANK[b.need]));
+// right after a block, leave the gateway alone for a while; the reader libraries still get copied this slice
+const gatewayPaused = !ONLY && (status.gateway.pauseUntil || 0) > now;
+if (gatewayPaused) { log(`gateway paused until ${new Date(status.gateway.pauseUntil).toISOString()} after a block: copying reader libraries only`); for (let i = queue.length - 1; i >= 0; i--) if (!isReader(queue[i].slug)) queue.splice(i, 1); }
+log(`${candidates.length} candidate libraries, ${queue.length} to work on (${queue.filter(q => q.need === "new").length} new, ${queue.filter(q => q.need === "topup").length} top-up, ${queue.filter(q => q.need === "refresh").length} refresh), ${waiting.length} waiting out a backoff, ${Object.keys(index).length} copied, budget ${(BUDGET_MS / 6e4).toFixed(0)} min, parallel ${PAR}`);
 if (!queue.length) {
   for (const s of waiting) status.libraries[s] = { ...status.libraries[s], state: "waiting after failures" };
   writeStatus(0); log("nothing to do right now"); process.exit(3);
@@ -495,8 +547,21 @@ let failed = 0, doneCount = 0, paused = false, blocked = false;
 // one library, start to finish or until the time budget; -> "stop" ends that line of work
 async function workOn(q) {
   const { slug } = q, name = names.get(slug) || slug, t = Date.now(), p0 = stats.pages;
+  if (q.need === "topup") {
+    let r;
+    try { r = await topUp(slug); } catch (e) { r = e.blocked ? { result: "blocked" } : { result: "failed", error: e.message }; }
+    if (r.result === "topped") {
+      publishTopUp(slug, r); doneCount++;
+      if (!DRY) writeAtomic(idxPath, JSON.stringify({ ...index }));
+      log(`topped ${slug}: ${r.fresh.length} new, ${r.updated} shelf changes, ${stats.pages - p0} pages`);
+      return "next";
+    }
+    if (r.result === "paused") { paused = true; return "stop"; }
+    if (r.result === "blocked") { blocked = true; status.gateway.pauseUntil = Date.now() + GATEWAY_PAUSE_MS; log(`::warning::gateway blocked the top-up of ${slug}; leaving it alone for ${GATEWAY_PAUSE_MS / 6e4} min`); return "stop"; }
+    log(`::warning::top-up of ${slug} failed: ${cleanError(r.error)}`); return "next";
+  }
   let st = loadState(slug);
-  if (st && q.need === "refresh" && st.startedAt < index[slug]?.finished) st = null;   // state older than the current copy
+  if (st && q.need === "refresh" && st.startedAt < (index[slug]?.full || index[slug]?.finished)) st = null;   // a top-up does not count   // state older than the current copy
   if (!st) st = { slug, startedAt: Date.now(), sc: "", rows: [], ids: new Set(), fmts: {}, done: {} };
   const meta = status.libraries[slug] || { attempts: 0 };
   let r;
@@ -516,7 +581,7 @@ async function workOn(q) {
     log(`paused ${slug}: ${have} pages saved, will resume next run`);
     paused = true; return "stop";
   } else if (r.result === "blocked") {
-    blocked = true; failed++;
+    blocked = true; failed++; status.gateway.pauseUntil = Date.now() + GATEWAY_PAUSE_MS;
     status.libraries[slug] = { ...meta, state: "in progress, run blocked by the library gateway", name, error: cleanError(r.error), blockedAt: new Date().toISOString() };
     log(`::error::BLOCKED while copying ${slug}: ${cleanError(r.error)}. Progress is saved; stopping this run.`);
     return "stop";
@@ -550,7 +615,8 @@ writeStatus(failed);
 log(`summary: ${doneCount} copied, ${failed} failed, ${paused ? "paused at time budget" : "queue finished"}, ${stats.pages} pages in ${((Date.now() - T0) / 6e4).toFixed(1)} min, ${stats.retries} retries, ${stats.http429} x 429, ${stats.http403} x 403, ${stats.http5xx} x 5xx, ${stats.timeouts} timeouts`);
 // 5 = the gateway blocked us (stop this run), 6 = some libraries failed (normal: each waits out a backoff and is
 // retried), 4 = the want list could not be read. Only 4 and crashes mean the copier itself is broken.
-process.exit(blocked ? 5 : failed ? 6 : 0);
+// a block no longer ends the run: the next slice skips the gateway for GATEWAY_PAUSE_MS and keeps copying readers
+process.exit(failed ? 6 : 0);
 
 function writeStatus(failedCount) {
   if (DRY) return;

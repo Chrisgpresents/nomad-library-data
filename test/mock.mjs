@@ -30,7 +30,9 @@ http.createServer((req, res) => {
       const pages = lib[fmt] ?? 0;
       const results = [], bibs = {};
       if (pages && page <= pages) for (let i = 0; i < (lib.thin ? 5 : 25); i++) {
-        const n = (page - 1) * 25 + i, id = `${slug}-${fmt[0]}-${n}`, t = TITLES[n % TITLES.length];
+        // newOnTop: { "slug:FMT": k } = k discs acquired since the first copy, listed first (newest acquired first)
+        const k = cfg.newOnTop?.[`${slug}:${fmt}`] || 0, n0 = (page - 1) * 25 + i - k;
+        const n = Math.abs(n0), id = n0 < 0 ? `${slug}-${fmt[0]}-new${-n0}` : `${slug}-${fmt[0]}-${n0}`, t = TITLES[n % TITLES.length];
         results.push({ representative: id });
         bibs[id] = { briefInfo: { title: t, subtitle: "", publicationDate: "2012", subjectHeadings: ["Drama"], genreForm: [], jacket: { medium: `https://secure.syndetics.com/index.aspx?isbn=${n}/MC.GIF&client=testlib&type=xw12&oclc=&upc=${n}` } }, availability: { status: n % 3 ? "AVAILABLE" : "UNAVAILABLE", heldCopies: n % 4 } };
       }

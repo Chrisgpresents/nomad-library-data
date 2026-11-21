@@ -78,7 +78,7 @@ await scenario("budget runs out mid-library, then resumes without refetching", {
 
 await scenario("a failing page: no publish, old copy kept, only that page retried later", { libs: { m4: { BLURAY: 5, DVD: 5 } } }, async c => {
   ok(c.run(["--only", "m4"]).code === 0, "first copy published");
-  const idx = c.index(); idx.m4.finished -= 20 * 864e5; fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
+  const idx = c.index(); idx.m4.finished -= 25 * 864e5; idx.m4.topped = Date.now(); fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
   const before = crypto.createHash("sha1").update(fs.readFileSync(path.join(c.out, "snap/m4.json.gz"))).digest("hex");
   c.setCfg({ libs: { m4: { BLURAY: 5, DVD: 5 } }, fail: { "m4:DVD:3": "always500" } });
   const r = c.run(["--only", "m4"]);
@@ -104,9 +104,10 @@ await scenario("fair queue: a failing library backs off and does not starve a ne
   ok(/waiting out a backoff|nothing to do/.test(r2.log) && (await c.hits()).byKey["m4:DVD:1"] === h1, "m4 is not hammered again right away");
 });
 
-await scenario("403 block: stop quickly, keep progress, exit 5", { libs: { m6: { BLURAY: 40, DVD: 40 } }, blockAfter: 14 }, async c => {
+await scenario("403 block: stop quickly, keep progress, pause the gateway (exit 6)", { libs: { m6: { BLURAY: 40, DVD: 40 } }, blockAfter: 14 }, async c => {
   const r = c.run(["--only", "m6", "--budget-min", "0.05"], { COOL_PROBE_MS: "300" });
-  ok(r.code === 5, `exit 5 = blocked (got ${r.code})`);
+  ok(r.code === 6, `exit 6, a block no longer ends the run (got ${r.code})`);
+  ok(c.status().gateway.pauseUntil > Date.now(), "gateway paused for the next slices");
   ok(/BLOCKED/.test(r.log), "log says BLOCKED");
   const h = await c.hits();
   ok(h.blocked <= 22, `only the 2 failed batches plus one probe per 300 ms hit the block (${h.blocked} blocked requests)`);
@@ -125,9 +126,9 @@ await scenario("a temporary block: wait with probes, then finish the same copy",
   ok(h.blocked < 60, `did not hammer while blocked (${h.blocked} blocked requests, ${h.blocks} blocks)`);
 });
 
-await scenario("a block that never lifts: gives up inside the budget, keeps progress, exit 5", { libs: { m8: { BLURAY: 40, DVD: 40 } }, blockAfter: 14 }, async c => {
+await scenario("a block that never lifts: gives up inside the budget, keeps progress", { libs: { m8: { BLURAY: 40, DVD: 40 } }, blockAfter: 14 }, async c => {
   const r = c.run(["--only", "m8", "--budget-min", "0.05"], { COOL_PROBE_MS: "300" });
-  ok(r.code === 5, `exit 5 (got ${r.code})`);
+  ok(r.code === 6, `exit 6 (got ${r.code})`);
   ok(c.has(path.join(c.state, "m8.json")) && !c.has(path.join(c.out, "snap/m8.json.gz")), "progress kept, nothing published");
   ok(c.status().gateway.blocks.some(b => !b.recovered), "status records the block that did not lift");
 });
@@ -160,8 +161,25 @@ await scenario("only the requested library is copied", { libs: { ...quick, visit
 await scenario("a copied library stays fresh even when it is not on the wanted list", { libs: { oldlib: small }, wanted: [] }, async c => {
   ok(c.run(["--only", "oldlib"]).code === 0, "copied once");
   const idx = c.index(); idx.oldlib.finished -= 30 * 864e5; fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
+  const r1 = c.run();
+  ok(r1.code === 0 && /topped oldlib/.test(r1.log), `daily top-up runs first (exit ${r1.code})`);
   const r = c.run();
-  ok(r.code === 0 && c.index().oldlib.finished > idx.oldlib.finished + 20 * 864e5, `refreshed without being requested again (exit ${r.code})`);
+  ok(r.code === 0 && c.index().oldlib.full === undefined && c.index().oldlib.finished > idx.oldlib.finished + 20 * 864e5, `then the full refresh (exit ${r.code})`);
+});
+await scenario("daily top-up: adds new arrivals with a few requests, keeps the rest", { libs: { tl: { BLURAY: 2, DVD: 6 } }, wanted: [["tl", "Top-up library", 1]] }, async c => {
+  ok(c.run().code === 0, "copied once");
+  const before = c.snap("tl").rows.length, idx = c.index();
+  idx.tl.finished -= 2 * 864e5; fs.writeFileSync(path.join(c.out, "snap/index.json"), JSON.stringify(idx));
+  const h0 = (await c.hits()).pages;
+  c.setCfg({ libs: { tl: { BLURAY: 2, DVD: 6 } }, wanted: [["tl", "Top-up library", 1]], newOnTop: { "tl:DVD": 30 } });
+  const r = c.run();
+  const s = c.snap("tl"), used = (await c.hits()).pages - h0;
+  ok(r.code === 0 && /topped tl: 30 new/.test(r.log), `30 new discs found (exit ${r.code})`);
+  ok(s.rows.length === before + 30 && s.rows[0][0].includes("new"), `copy grew by 30, newest first (${before} -> ${s.rows.length})`);
+  ok(used <= 6, `only ${used} gateway requests (a full copy is 8+)`);
+  ok(c.index().tl.full < c.index().tl.finished && c.index().tl.topped, "index keeps the full-copy time apart from the top-up");
+  const r2 = c.run();
+  ok(r2.code === 3, `topped today: nothing to do (exit ${r2.code})`);
 });
 if (fail) process.exitCode = 1;
 

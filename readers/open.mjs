@@ -150,6 +150,8 @@ export async function page(lib, task, n, ctx) {
     // the stored search may have been dropped by the catalog: post it again (the hash is the same for the same search)
     const s = await search(lib, ctx, task.group, !!task.av);
     if (s && s.hash) { task.hash = s.hash; ({ t } = await getText(ctx, url.replace(/searchhash=[^&]+/, "searchhash=" + s.hash))); rows = parseResults(t, task); }
+    // the "available now" count moves all day: the last page can simply be gone by the time it's fetched
+    if (!rows.length && s && s.count <= (n - 1) * PER) return [];
     if (!rows.length) throw new Error(`empty result page ${n}`);
   }
   return rows;

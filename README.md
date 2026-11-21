@@ -16,7 +16,7 @@ No keys, no servers, nothing on a Cloudflare Worker.
 - Not done on purpose: running several runners at once to get more addresses past the allowance.
 
 ## Other catalog systems (since 11.1.26)
-- `readers/<system>.mjs` (vega, polaris, enterprise, carl) follow `readers/README.md`. A wanted entry whose id has a dot
+- `readers/<system>.mjs` (vega, polaris, enterprise, carl, spydus, encore, open) follow `readers/README.md`. A wanted entry whose id has a dot
   (`vega.sdpl.na5.iiivega.com`) is copied by its reader through `ctx.fetch`, paced at READER_RATE (1/s) per library host,
   never through the BiblioCommons gateway. The wanted list carries the visitor's catalog link (4th field); it is kept in
   the state and in index.json for refreshes. Manual runs: `ONLY_URLS="id|url,..." node crawl.mjs --only id,...`.

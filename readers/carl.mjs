@@ -27,11 +27,14 @@ async function search(lib, ctx, term, startIndex, hits, filters = []) {
   try { return JSON.parse(txt); } catch { throw new Error("carl: not JSON: " + txt.slice(0, 120)); }
 }
 
-function kind(fmt) {
+// Handley files console games as format "Software", title "1-2-Switch [Nintendo Switch electronic game (chip)]."
+const GAME_NOTE = /\[([^\]]*(?:electronic game|video ?game|playstation|xbox|nintendo|switch|\bwii)[^\]]*)\]/i;
+function kind(fmt, title = "") {
   const f = String(fmt || "");
   if (/blu|uhd|4k/i.test(f)) return "b";
   if (/dvd/i.test(f)) return "d";
   if (GAME.test(f)) return "g";
+  if (/software|cd-?rom|computer|electronic/i.test(f) && GAME_NOTE.test(title)) return "g";
   return "";
 }
 
@@ -44,7 +47,7 @@ export async function plan(lib, ctx) {
   // one entry; page() returns both DVD and Blu-ray rows from the same stream (rows carry their own f)
   if (total) out.push({ f: "d", pages: Math.ceil(total / PAGE), count: total, q: "dvd", note: "rows include f:b too" });
   const g = await search(lib, ctx, "video game", 0, 20);
-  const gn = (g.resources || []).filter(r => kind(r.format) === "g").length;
+  const gn = (g.resources || []).filter(r => kind(r.format, r.shortTitle) === "g").length;
   if (gn >= 3) out.push({ f: "g", pages: Math.ceil((g.totalHits || 0) / PAGE), count: g.totalHits || 0, q: "video game" });
   return out;
 }
@@ -56,14 +59,14 @@ export async function page(lib, task, n, ctx) {
   const rows = [];
   for (const r of d.resources || []) {
     if (r.rtype && r.rtype !== 1) continue;
-    const f = kind(r.format);
+    const f = kind(r.format, r.shortTitle);
     if (!f) continue;
     if (task.f === "g" ? f !== "g" : f === "g") continue;
     const year = parseInt(r.publicationDate && r.publicationDate.publicationDate, 10) || 0;
     const avail = (r.holdingsInformations || []).some(h => h.onshelf && !h.hideFromPublic) ? 1 : 0;
     rows.push({
       id: String(r.id), title: clean(r.shortTitle), sub: "", f, disc: year, cover: "",
-      avail, holds: 0, subj: r.mainSeries || "", plat: f === "g" ? String(r.format) : "",
+      avail, holds: 0, subj: r.mainSeries || "", plat: f === "g" ? (GAME.test(r.format) ? String(r.format) : (String(r.shortTitle || "").match(GAME_NOTE) || [])[1] || "") : "",
     });
   }
   return rows;

@@ -206,7 +206,7 @@ export async function page(lib, task, n, ctx) {
     const im = b.match(/<img[^>]*id="hover_image_\d+"[^>]*src="([^"]+)"/i);
     if (im && !/upc=&|isbn=&upc=&issn=&/.test(im[1]) && !/nocover|blank|default/i.test(im[1])) cover = dec(im[1]);
     const hm = b.match(/nsm-e8">\s*(\d+)/);
-    const am = b.match(/nsm-brief-label[^>]*>\s*(?:Local Availability|Available Copies[^<]*|Availability)\s*:[\s\S]{0,300}?nsm-brief-inline-subzone">\s*(\d+)\s*\(of/i);
+    const am = b.match(/nsm-brief-label[^>]*>\s*(?:Local Availability|System Availability|Available Copies[^<]*|Availability)\s*:[\s\S]{0,300}?nsm-brief-inline-subzone">\s*(\d+)\s*\(of/i);
     const sm = b.match(/Subject[^<]*<\/span>[\s\S]*?nsm-short-item[^>]*>([\s\S]*?)<\/span>\s*<\/div>/i);
     let plat = "";
     if (task.f === "g") { const hay = rawTitle + " " + text(b.match(/Call Number[\s\S]{0,300}/)?.[0] || ""); for (const [re, nm] of PLAT) if (re.test(hay)) { plat = nm; break; } }

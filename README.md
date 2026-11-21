@@ -26,6 +26,16 @@ So the copier tiptoes instead of copying live:
 `crawl.mjs` runs daily on GitHub Actions and publishes `snap/<slug>.json` to GitHub Pages (branch gh-pages).
 No keys, no servers, nothing on a Cloudflare Worker.
 
+## Mirrors: BiblioCommons libraries read through their own catalog (since 11.21.26)
+BiblioCommons sits on top of each library's own catalog, and its record ids are `S<n>C<that catalog's record number>`
+(Burlington `S232C926086` = Polaris record 926086, Backrooms). `mirrors.json` maps a BiblioCommons slug to a reader id,
+catalog link and prefix. The reader copies the library's own catalog (paced 1/s, refreshed every 2 days like any reader),
+then `publishMirror` writes the BiblioCommons copy `snap/<slug>.json.gz` with the same ids, so Check at, Place a hold and
+saved favorites still go to BiblioCommons. A mirrored slug never uses the gateway and leaves the weekly rotation. Holds:
+a catalog whose result list shows none keeps the last count BiblioCommons gave. `mirror-survey.json` is the partial
+11.21.26 survey of which BiblioCommons libraries run which catalog underneath (verified = a record number matched).
+- Live: bclsnj (Burlington County, Polaris, 31,784 titles vs 28,874 from BiblioCommons, shelf status from "System Availability").
+
 ## Capacity (measured 10.11.26 on GitHub-hosted runners; out of date since 11.10.26, see the weekly rotation above)
 - The library gateway allows an address about 480 requests, then answers 403 for about 3 minutes, then allows about 480 more (two cycles seen, no 429 or 5xx). Page size is capped at 25 titles whatever `limit` says, so a library costs about titles / 25 + 3 requests (Alameda: 25,393 titles = 1,018 requests).
 - A steady 1.1 requests/s (with 2 in flight; slow libraries like New York need 4 so latency does not cap the rate) copied Alameda in 15.5 minutes with no 403 at all, the same speed as bursting and waiting out blocks (1.2/s average). That is the default. The copier still waits out a block with one probe a minute if one happens.

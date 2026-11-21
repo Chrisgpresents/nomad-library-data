@@ -521,6 +521,35 @@ async function finishLibrary(slug, st, name, index) {
   return { result: "done", total: rows.length, bytes: gz.length };
 }
 
+// ---- BiblioCommons libraries read through their own catalog (mirrors.json) ----------------------------------
+// BiblioCommons sits on top of each library's own catalog (Polaris, Sierra, ...), and its record ids are
+// "S<n>C<that catalog's record number>". So a reader copy of the library's own catalog can fill the BiblioCommons
+// shelf with the same ids: Check at, Place a hold and saved favorites keep working, and the gateway is never asked.
+// mirrors.json: { "<bc slug>": { "reader": "<reader id>", "url": "<catalog link>", "prefix": "S232C" } }
+const MIRRORS = readJson(new URL("./mirrors.json", import.meta.url), {});
+const mirrorOf = new Map(Object.entries(MIRRORS).map(([bc, m]) => [m.reader, bc]));
+// "https://secure.syndetics.com/index.aspx?isbn=X/SC.GIF&client=c&upc=U&oclc=O" -> "~X~U~O" (the site's short form)
+function shortCover(c) {
+  if (!/syndetics\.com/i.test(c || "")) return c || "";
+  const q = k => (c.match(new RegExp("[?&]" + k + "=([^&/]*)", "i")) || [])[1] || "";
+  return "~" + q("isbn") + "~" + q("upc") + "~" + q("oclc");
+}
+function publishMirror(bc, rows) {
+  const m = MIRRORS[bc], file = path.join(OUT, "snap", bc + ".json.gz");
+  let old = null; try { old = JSON.parse(zlib.gunzipSync(fs.readFileSync(file))); } catch {}
+  // holds: a catalog that shows none in its result list keeps the last count BiblioCommons gave us
+  const oldHolds = new Map((old?.rows || []).map(r => [r[0], r[7]]));
+  const out = rows.map(r => { const id = m.prefix + r[0], x = [id, ...r.slice(1)]; x[5] = shortCover(x[5]); if (!x[7]) x[7] = oldHolds.get(id) || 0; return x; });
+  const now = Date.now();
+  const raw = `{"ver":${now},"finished":${now},"full":${now},"total":${out.length},"sc":${JSON.stringify(old?.sc || "")},"src":${JSON.stringify(m.reader.split(".")[0])},"rows":[${out.map(x => JSON.stringify(x)).join(",")}]}`;
+  const gz = zlib.gzipSync(raw, { level: 9 });
+  if (DRY) { writeAtomic(path.join(OUT, "dry", bc + ".json.gz"), gz); return; }
+  writeAtomic(file, gz);
+  index[bc] = { ...(index[bc] || {}), name: index[bc]?.name || names.get(bc) || bc, finished: now, full: now, topped: now, total: out.length, bytes: gz.length, rawBytes: raw.length, src: m.reader };
+  status.libraries[bc] = { state: "copied", finished: now, total: out.length, name: index[bc].name, via: m.reader };
+  log(`mirror ${bc}: ${out.length} titles from ${m.reader}`);
+}
+
 // ---- which libraries, in what order ------------------------------------------------------------
 async function wantedList() {
   try {
@@ -554,7 +583,9 @@ for (const [slug, name, at, url] of wanted || []) { names.set(slug, name || slug
 for (const p of (process.env.ONLY_URLS || "").split(",").filter(Boolean)) { const i = p.indexOf("|"); if (i > 0) urls.set(p.slice(0, i), p.slice(i + 1)); }
 // libraries already copied stay fresh even if nobody has "requested" them lately (they were requested once)
 for (const [slug, e] of Object.entries(index)) if (!names.has(slug)) { names.set(slug, e.name || slug); asked.set(slug, 0); }
-let candidates = ONLY ? ONLY.split(",") : [...names.keys()];
+// a mirrored library is copied through its own catalog only while it is wanted or already copied
+for (const [bc, m] of Object.entries(MIRRORS)) if (index[bc] || names.has(bc)) { urls.set(m.reader, m.url); if (!names.has(m.reader)) { names.set(m.reader, index[bc]?.name || names.get(bc) || bc); asked.set(m.reader, asked.get(bc) || 1); } }
+let candidates = (ONLY ? ONLY.split(",") : [...names.keys()]).map(s => MIRRORS[s]?.reader || s).filter((s, i, a) => !MIRRORS[s] && a.indexOf(s) === i);
 const queue = [], waiting = [];
 for (const slug of candidates) {
   const st0 = readJson(path.join(STATE, slug + ".json"), null);
@@ -585,7 +616,7 @@ const dropGateway = () => { for (let i = queue.length - 1; i >= 0; i--) if (!isR
 if (gatewayPaused) { log(`gateway paused until ${new Date(status.gateway.pauseUntil).toISOString()} after a block: copying reader libraries only`); dropGateway(); }
 if (ROTATING) {
   // today's slice: the oldest 1/ROTATION_DAYS of the BiblioCommons copies, plus any older than ROTATION_DAYS
-  const bcCopies = Object.keys(index).filter(k => !isReader(k));
+  const bcCopies = Object.keys(index).filter(k => !isReader(k) && !MIRRORS[k]);
   const overdue = bcCopies.filter(k => (index[k].topped || index[k].finished) < now - ROTATION_DAYS * 864e5).length;
   const slice = Math.max(Math.ceil(bcCopies.length / ROTATION_DAYS) - G.rot.refreshed, overdue, 0);
   let n = 0;
@@ -631,6 +662,7 @@ async function workOn(q) {
   try {
     r = isReader(slug) ? await crawlReader(slug, st) : await crawlLibrary(slug, st);
     if (r.result === "done") r = await finishLibrary(slug, st, name, index);
+    if (r.result === "done" && mirrorOf.has(slug)) publishMirror(mirrorOf.get(slug), st.rows);
   } catch (e) { saveState(st); r = e.blocked ? { result: "blocked", error: `the library gateway answered 403 (blocked) after ${stats.requests} requests this run` } : e.budget ? { result: "paused" } : { result: "failed", error: e.message }; }
   const secs = ((Date.now() - t) / 1e3).toFixed(0);
   if (r.result === "done") {

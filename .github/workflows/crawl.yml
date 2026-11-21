@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       only: { description: "copy only these library slugs (comma separated); empty = the normal queue", default: "" }
-      rate: { description: "gateway requests per second", default: "1.1" }
+      rate: { description: "gateway requests per second", default: "0.15" }
       parallel: { description: "requests in flight (the rate limit sets the real pace; slow libraries need more in flight)", default: "4" }
 concurrency: { group: crawl, cancel-in-progress: false }
 permissions: { contents: write }
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
-      RATE: ${{ inputs.rate || '1.1' }}
+      RATE: ${{ inputs.rate || '0.15' }}
       PARALLEL: ${{ inputs.parallel || '4' }}
       ONLY: ${{ inputs.only }}
       REPO_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git

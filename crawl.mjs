@@ -99,7 +99,9 @@ function shape(id, b, f, seen) {
 }
 
 // ---- network with bounded retries --------------------------------------------------------------
-const RATE = +(process.env.RATE || 1.1);    // gateway requests per second. Measured 10.11.26: the gateway allows ~480 requests then blocks an address for ~3 min; a steady 1.1/s ran 1,018 requests with no block
+// 11.21.26: from GitHub's addresses the gateway now blocks after ~50 to 65 quick requests and lets us back in within
+// 20 minutes, so it's asked once every ~7 s (45 requests per 5 minutes). Daily top-ups need ~1,000 requests (~2 hours).
+const RATE = +(process.env.RATE || 0.15);    // gateway requests per second. Measured 10.11.26: the gateway allows ~480 requests then blocks an address for ~3 min; a steady 1.1/s ran 1,018 requests with no block
 let nextSlot = 0;
 async function slot() { const now = Date.now(), at = Math.max(nextSlot, now); nextSlot = at + 1000 / RATE; if (at > now) await sleep(at - now); }
 const stats = { pages: 0, requests: 0, retries: 0, http429: 0, http403: 0, http5xx: 0, timeouts: 0, busyMs: 0 };

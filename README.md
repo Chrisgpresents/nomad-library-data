@@ -16,7 +16,7 @@ No keys, no servers, nothing on a Cloudflare Worker.
 - Not done on purpose: running several runners at once to get more addresses past the allowance.
 
 ## Other catalog systems (since 11.1.26)
-- `readers/<system>.mjs` (vega, polaris, enterprise, carl, spydus, encore, open) follow `readers/README.md`. A wanted entry whose id has a dot
+- `readers/<system>.mjs` (vega, polaris, enterprise, carl, spydus, encore, open, corvina, aspen) follow `readers/README.md`. A wanted entry whose id has a dot
   (`vega.sdpl.na5.iiivega.com`) is copied by its reader through `ctx.fetch`, paced at READER_RATE (1/s) per library host,
   never through the BiblioCommons gateway. The wanted list carries the visitor's catalog link (4th field); it is kept in
   the state and in index.json for refreshes. Manual runs: `ONLY_URLS="id|url,..." node crawl.mjs --only id,...`.
@@ -27,3 +27,9 @@ No keys, no servers, nothing on a Cloudflare Worker.
 - Measured 11.1.26: Vega 1,000 titles per request (Jefferson County 42k titles in 51 requests, 91 s; Vega stops at
   result 10,000, so big formats are split into year ranges; title order pages without repeats). Polaris 100 per
   request (53 to ~720 requests). Enterprise 100 per request plus one availability call per page. LS2 PAC 50 per request.
+- Aspen Discovery (`readers/aspen.mjs`): `GET {base}/API/SearchAPI?method=search` with `lookfor=*:*`, `searchSource=local`,
+  `sort=title` and one `filter[]=format:"…"` task per disc or game facet (Blu-ray tasks run first, because one grouped
+  work id is shared by every format and the copier keeps the first). Page size asked is 50; the reader then uses the
+  size the catalog reports, up to 50. Hosts tried on 11.20.26 answered Cloudflare 403 or an Anubis HTML wall (see
+  `readers/aspen.md`). That is a hard failure. The reader does not solve the challenge. A catalog that returns JSON is
+  copied. `available_at` is not in the default search fields, so avail stays unknown unless a record happens to include it.

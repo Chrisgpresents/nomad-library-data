@@ -1,0 +1,21 @@
+name: try-reader
+# One reader's quick test (plan + first page of each format) from a GitHub runner, the address the copier uses.
+# Publishes nothing. Example: reader=koha, url=https://catalog.cclsny.org/
+on:
+  workflow_dispatch:
+    inputs:
+      reader: { description: "reader (has readers/try-<reader>.mjs)", default: "koha" }
+      url: { description: "catalog link", default: "https://catalog.cclsny.org/" }
+permissions: { contents: read }
+jobs:
+  try:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - env: { READER: "${{ inputs.reader }}", URL: "${{ inputs.url }}" }
+        run: |
+          [[ "$READER" =~ ^[a-z]+$ ]] && [ -f "readers/try-$READER.mjs" ] || { echo "no readers/try-$READER.mjs"; exit 1; }
+          node "readers/try-$READER.mjs" "$URL"
